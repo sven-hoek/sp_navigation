@@ -28,7 +28,7 @@ class ImageSubscriber
 	message_filters::TimeSynchronizer<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::CameraInfo, sensor_msgs::CameraInfo> sync_; /**< Stereo topic synchronizer. */
 	
 	public:
-	//image_geometry::StereoCameraModel cam_model_;
+	image_geometry::StereoCameraModel cam_model_;
 	cv_bridge::CvImageConstPtr limage_cptr_;
 	cv_bridge::CvImageConstPtr rimage_cptr_;
 
@@ -59,7 +59,8 @@ class ImageSubscriber
 	  ROS_INFO_STREAM_NAMED("Viewer Test", "got callback.");
 	  try
 	  {
-		//cam_model_.fromCameraInfo(lcinfo, rcinfo);
+	  	
+		cam_model_.fromCameraInfo(lcinfo, rcinfo);
 		limage_cptr_ = cv_bridge::toCvShare(limage, "mono16");
 		rimage_cptr_ = cv_bridge::toCvShare(rimage, "mono16");
 	  }
