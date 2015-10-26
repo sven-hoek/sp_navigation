@@ -46,7 +46,7 @@ class ImageSubscriber
 	    limage_sub_.subscribe(it_, ros::names::clean(stereo_namespace + "/left/image_rect"), 3);
 	    rimage_sub_.subscribe(it_, ros::names::clean(stereo_namespace + "/right/image_rect"), 3);
 	    lcinfo_sub_.subscribe(nh, ros::names::clean(stereo_namespace + "/left/camera_info"), 3);
-	    rcinfo_sub_.subscribe(nh, ros::names::clean(stereo_namespace + "/right/camera_info"), 3);    
+	    rcinfo_sub_.subscribe(nh, ros::names::clean(stereo_namespace + "/right/camera_info"), 3);
 	    sync_.connectInput(limage_sub_, rimage_sub_, lcinfo_sub_, rcinfo_sub_),
 	    sync_.registerCallback(boost::bind(&ImageSubscriber::imageCallback, this, _1, _2, _3, _4));
 	}
@@ -56,13 +56,12 @@ class ImageSubscriber
 	 * */
 	void imageCallback(const sensor_msgs::Image::ConstPtr& limage, const sensor_msgs::Image::ConstPtr& rimage, const sensor_msgs::CameraInfo::ConstPtr& lcinfo, const sensor_msgs::CameraInfo::ConstPtr& rcinfo)
 	{
-	  ROS_INFO_STREAM_NAMED("Viewer Test", "got callback.");
+	  ROS_INFO_STREAM_NAMED("Subscriber Test", "got callback.");
 	  try
 	  {
-	  	
 		cam_model_.fromCameraInfo(lcinfo, rcinfo);
-		limage_cptr_ = cv_bridge::toCvShare(limage, "mono16");
-		rimage_cptr_ = cv_bridge::toCvShare(rimage, "mono16");
+		limage_cptr_ = cv_bridge::toCvShare(limage, "mono8");
+		rimage_cptr_ = cv_bridge::toCvShare(rimage, "mono8");
 	  }
 	  catch (...)
 	  {
@@ -80,6 +79,26 @@ int main(int argc, char** argv)
 	ros::init(argc, argv, "sp_navigation");
 	ros::NodeHandle nh;
 	sp_navigation::ImageSubscriber image_sub(nh);
+	
+	cv::namedWindow("Left", cv::WINDOW_NORMAL);
+	cv::namedWindow("Right", cv::WINDOW_NORMAL);
+	cv::Mat left, right;
+	
+	ros::Rate loop_rate(10);
+	while (ros::ok())
+	{
+		ros::spinOnce();
+		if (image_sub.limage_cptr_ != NULL && image_sub.rimage_cptr_ != NULL)
+		{
+			image_sub.limage_cptr_->image.copyTo(left);
+			image_sub.rimage_cptr_->image.copyTo(right);
+
+			cv::imshow("Left", left);
+			cv::imshow("Right", right);
+			cv::waitKey(1);
+		}
+		loop_rate.sleep();
+	}
 	
 	ros::spin();
 }

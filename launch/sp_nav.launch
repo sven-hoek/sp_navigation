@@ -1,0 +1,34 @@
+<launch>
+  <!-- Setup the camera -->
+  <arg name="camera" default="/apollon/vrmagic"/>
+  <arg name="bagfile" default="$(find sp_navigation)/data/stereo_raw_meters.bag"/>
+  <param name="/use_sim_time" value="true"/>
+
+  <!-- Setup robot: tf and robot model -->
+  <node pkg="tf" type="static_transform_publisher" name="baselink_broadcaster" args="0.0971762 0.15991 0.2773538 0.49462 -0.50437 0.49653 -0.50426 base_link VRMAGIC 100" />
+  <param name="robot_description" command="cat $(find robotino_description)/urdf/robotino.urdf" />
+
+  <!-- Run the stereo image proc -->
+  <group ns="$(arg camera)">
+    <node pkg="stereo_image_proc" type="stereo_image_proc" name="stereo_image_proc">
+      <param name="min_disparity" value="60"/>
+      <param name="disparity_range" value="96"/>
+    </node>
+  </group>
+  
+  <!-- Run the sp_navigation node -->
+  <node pkg="sp_navigation" type="sp_navigation" name="short_path_navigation" args="stereo:=/apollon/vrmagic" />
+
+  <!-- Play the bagfile -->
+  <node pkg="rosbag" type="play" name="player" args="--clock -d 1 -r 0.3 -l $(arg bagfile)" output="screen"/>
+
+  <!-- Run external visual odometry to compare
+  <node pkg="viso2_ros" type="stereo_odometer" name="stereo_odometer" output="screen">
+    <remap from="stereo" to="$(arg camera)"/>
+    <remap from="image" to="image_rect"/>
+    <param name="base_link_frame_id" value="base_link"/>
+    <param name="publish_tf" value="true"/>
+  </node>
+  -->
+
+</launch>
