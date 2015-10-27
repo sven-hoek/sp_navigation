@@ -1,0 +1,7 @@
+<launch>
+  <!-- Run image_view for the left image -->
+  <node pkg="image_view" type="image_view" name="image_view_left" args="image:=/sp_navigation/left/image_mono" />
+  
+  <!-- Run image_view for the right image -->
+  <node pkg="image_view" type="image_view" name="image_view_right" args="image:=/sp_navigation/right/image_mono" />
+</launch>
