@@ -4,7 +4,8 @@
 #include <opencv/highgui.h>
 #include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
-#include <message_filters/time_synchronizer.h>
+#include <message_filters/synchronizer.h>
+#include <message_filters/sync_policies/approximate_time.h>
 #include <image_transport/subscriber_filter.h>
 #include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/Image.h>
@@ -13,9 +14,10 @@
 
 namespace sp_navigation
 {
+	typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::CameraInfo, sensor_msgs::CameraInfo> SyncPolicy;
 
 // Class for receiving and synchronizing stereo images
-class ImageSubscriber
+class StereoSubscriber
 {
 	private:
 	image_transport::ImageTransport it_;
@@ -23,7 +25,7 @@ class ImageSubscriber
 	image_transport::SubscriberFilter rimage_sub_; /**< right image msg. */
 	message_filters::Subscriber<sensor_msgs::CameraInfo> lcinfo_sub_; /**< Left camera info msg. */
 	message_filters::Subscriber<sensor_msgs::CameraInfo> rcinfo_sub_; /**< Right camera info msg. */
-	message_filters::TimeSynchronizer<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::CameraInfo, sensor_msgs::CameraInfo> sync_; /**< Stereo topic synchronizer. */
+	message_filters::Synchronizer<SyncPolicy> sync_; /**< Stereo topic synchronizer. */
 	image_transport::Publisher limage_pub_; /**< Left image publisher. */
 	image_transport::Publisher rimage_pub_; /**< Right image publisher. */
 	
@@ -36,12 +38,12 @@ class ImageSubscriber
 	/* Constructor
 	 *
 	 * */
-	ImageSubscriber(ros::NodeHandle& nh) :
+	StereoSubscriber(ros::NodeHandle& nh, const std::string nameToResolve) :
 		it_(nh),
-		sync_(4)
+		sync_(3)
 	{
 	    std::string stereo_namespace;
-	    stereo_namespace = nh.resolveName("stereo");
+	    stereo_namespace = nh.resolveName(nameToResolve);
 
 	    // Subscribe to stereo cameras
 	    limage_sub_.subscribe(it_, ros::names::clean(stereo_namespace + "/left/image_rect"), 3);
@@ -49,7 +51,7 @@ class ImageSubscriber
 	    lcinfo_sub_.subscribe(nh, ros::names::clean(stereo_namespace + "/left/camera_info"), 3);
 	    rcinfo_sub_.subscribe(nh, ros::names::clean(stereo_namespace + "/right/camera_info"), 3);
 	    sync_.connectInput(limage_sub_, rimage_sub_, lcinfo_sub_, rcinfo_sub_),
-	    sync_.registerCallback(boost::bind(&ImageSubscriber::imageCallback, this, _1, _2, _3, _4));
+	    sync_.registerCallback(boost::bind(&StereoSubscriber::syncCallback, this, _1, _2, _3, _4));
 	    
 	    // Initialize publishers
 	    limage_pub_ = it_.advertise("sp_navigation/left/image_mono", 1);
@@ -59,7 +61,7 @@ class ImageSubscriber
 	/* Callback method for synchronized stereo images
 	 *
 	 * */
-	void imageCallback(const sensor_msgs::Image::ConstPtr& limage, const sensor_msgs::Image::ConstPtr& rimage, const sensor_msgs::CameraInfo::ConstPtr& lcinfo, const sensor_msgs::CameraInfo::ConstPtr& rcinfo)
+	void syncCallback(const sensor_msgs::Image::ConstPtr& limage, const sensor_msgs::Image::ConstPtr& rimage, const sensor_msgs::CameraInfo::ConstPtr& lcinfo, const sensor_msgs::CameraInfo::ConstPtr& rcinfo)
 	{
 	  ROS_INFO_STREAM_NAMED("Subscriber Test", "got callback.");
 	  try
@@ -70,7 +72,7 @@ class ImageSubscriber
 	  }
 	  catch (...)
 	  {
-	    ROS_ERROR("Error in imageCallback!");
+	    ROS_ERROR("Error in syncCallback!");
 	  }
 	}
 	
@@ -84,7 +86,6 @@ class ImageSubscriber
 		limage_pub_.publish(cvImLeft.toImageMsg());
 		rimage_pub_.publish(cvImRight.toImageMsg());
 	}
-
 };
 
 } //End of namespace
@@ -95,7 +96,7 @@ int main(int argc, char** argv)
 	ros::init(argc, argv, "sp_navigation");
 	ros::NodeHandle nh;
 	
-	sp_navigation::ImageSubscriber image_sub(nh);
+	sp_navigation::StereoSubscriber stereo_sub(nh, "stereo");
 
 	cv::Mat left, right;
 	
@@ -103,15 +104,14 @@ int main(int argc, char** argv)
 	while (ros::ok())
 	{
 		ros::spinOnce();
-		if (image_sub.limage_cptr_ != NULL && image_sub.rimage_cptr_ != NULL)
+		if (stereo_sub.limage_cptr_ != NULL && stereo_sub.rimage_cptr_ != NULL)
 		{
-			image_sub.limage_cptr_->image.copyTo(left);
-			image_sub.rimage_cptr_->image.copyTo(right);
+			stereo_sub.limage_cptr_->image.copyTo(left);
+			stereo_sub.rimage_cptr_->image.copyTo(right);
 			
-			cv::circle(left, cv::Point(50, 50), 50, CV_RGB(255,0,0));
-			cv::circle(right, cv::Point(100, 100), 50, CV_RGB(255,0,0));
+
 			
-			image_sub.publishCVImages(left, right);
+			stereo_sub.publishCVImages(left, right);
 		}
 		
 		
