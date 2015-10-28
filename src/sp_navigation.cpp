@@ -67,8 +67,8 @@ class StereoSubscriber
 		try
 		{
 			stCamModel_.fromCameraInfo(lCamInfo, rCamInfo);
-			imgConstPtr_l_ = cv_bridge::toCvShare(lImage, "mono8");
-			imgConstPtr_r_ = cv_bridge::toCvShare(rImage, "mono8");
+			imgConstPtr_l_ = cv_bridge::toCvShare(lImage, "bgr8");
+			imgConstPtr_r_ = cv_bridge::toCvShare(rImage, "bgr8");
 		}
 		catch (cv_bridge::Exception& e)
 		{
@@ -88,8 +88,8 @@ class StereoSubscriber
 	 * */
 	void publishCVImages(const cv::Mat& lImage, const cv::Mat& rImage)
 	{
-		cv_bridge::CvImage cvImLeft(std_msgs::Header(), "mono8", lImage);
-		cv_bridge::CvImage cvImRight(std_msgs::Header(), "mono8", rImage);
+		cv_bridge::CvImage cvImLeft(std_msgs::Header(), "bgr8", lImage);
+		cv_bridge::CvImage cvImRight(std_msgs::Header(), "bgr8", rImage);
 		imgPub_l_.publish(cvImLeft.toImageMsg());
 		imgPub_r_.publish(cvImRight.toImageMsg());
 	}
@@ -130,6 +130,8 @@ int main(int argc, char** argv)
 			stereoSub.imgConstPtr_l_->image.copyTo(left);
 			stereoSub.imgConstPtr_r_->image.copyTo(right);
 			
+			cv::circle(left, cv::Point(100, 100), 10, CV_RGB(255,0,0));
+			cv::circle(right, cv::Point(100, 100), 10, CV_RGB(0,255,0));
 			
 			
 			stereoSub.publishCVImages(left, right);
