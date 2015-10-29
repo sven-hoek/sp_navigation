@@ -1,7 +1,7 @@
 #include <ros/ros.h>
 #include <image_transport/image_transport.h>
 #include <opencv2/core/core.hpp>
-#include <opencv/highgui.h>
+#include <opencv2/highgui/highgui.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
@@ -117,23 +117,84 @@ int main(int argc, char** argv)
 	sp_navigation::StereoSubscriber stereoSub(nh, "stereo");
 
 	cv::Mat left, right;
-	cv::ORB oFDDE;	// ORB feature detector and descriptor extractor
+	cv::ORB oFDDE(3000);	// ORB feature detector and descriptor extractor
 	cv::BFMatcher bfMatcher(cv::NORM_HAMMING, true); // Bruteforce matcher with implemented cross-checking if second arg is 'true'
 	
 	ros::Rate loopRate(10);
 	while (ros::ok())
 		{
+		// Let ROS spin, callback methods are called
 		ros::spinOnce();
 		if (stereoSub.imgConstPtr_l_ != NULL && stereoSub.imgConstPtr_r_ != NULL)
 			{
+			// Copy new pictures
 			stereoSub.imgConstPtr_l_->image.copyTo(left);
 			stereoSub.imgConstPtr_r_->image.copyTo(right);
 			
-			cv::circle(left, cv::Point(100, 100), 10, CV_RGB(255,0,0));
-			cv::circle(right, cv::Point(100, 100), 10, CV_RGB(0,255,0));
+			// Detect features and compute descriptors
+			std::vector<cv::KeyPoint> keyPoints_l, keyPoints_r;
+			cv::Mat descriptors_l, descriptors_r;
+			oFDDE(left, cv::noArray(), keyPoints_l, descriptors_l);
+			oFDDE(right, cv::noArray(), keyPoints_r, descriptors_r);
+			std::cout << "KeyPoints left:		" << keyPoints_l.size() << std::endl;
+			std::cout << "KeyPoints right:	" << keyPoints_r.size() << std::endl;
+			cv::drawKeypoints(left, keyPoints_l, left, cv::Scalar(255,0,0));
 			
+			// Match features with a descriptor(!)-distance below a threshold
+			std::vector<std::vector<cv::DMatch> > matches;
+			bfMatcher.radiusMatch(descriptors_l, descriptors_r, matches, 35);
 			
-			stereoSub.publishCVImages(left, right);
+			// Only use matches that fulfill the epipolar constraint, thus lying on one horizontal line
+			unsigned int numberOfMatches = 0;
+			std::vector<cv::DMatch> refinedMatches;
+			for(unsigned int i = 0; i < matches.size(); ++i)
+				{
+				numberOfMatches += matches[i].size() > 0 ? 1 : 0;
+				if (matches[i].size() > 0 && fabs(keyPoints_l[matches[i][0].queryIdx].pt.y - keyPoints_r[matches[i][0].trainIdx].pt.y) <= 2)
+					{
+					refinedMatches.push_back(matches[i][0]);
+					cv::line(left, cv::Point(keyPoints_l[matches[i][0].queryIdx].pt.x, keyPoints_l[matches[i][0].queryIdx].pt.y), cv::Point(keyPoints_r[matches[i][0].trainIdx].pt.x, keyPoints_r[matches[i][0].trainIdx].pt.y), cv::Scalar(0,0,200));
+					}
+				}
+			std::cout << "Matches:		" << numberOfMatches << std::endl;
+			std::cout << "refined Matches:	" << refinedMatches.size() << std::endl;
+			
+			// Create Vectors containing only Points from refined matches
+			std::vector<cv::KeyPoint> refinedKeyPoints_l, refinedKeyPoints_r;
+			std::vector<cv::Point2f> refinedPoints_l, refinedPoints_r;
+			for (unsigned int i = 0; i < refinedMatches.size(); ++i)
+				{
+				refinedKeyPoints_l.push_back(keyPoints_l[refinedMatches[i].queryIdx]);
+				refinedKeyPoints_r.push_back(keyPoints_r[refinedMatches[i].trainIdx]);
+				
+				refinedPoints_l.push_back(keyPoints_l[refinedMatches[i].queryIdx].pt);
+				refinedPoints_r.push_back(keyPoints_r[refinedMatches[i].trainIdx].pt);
+				}
+			cv::drawKeypoints(left, refinedKeyPoints_l, left, cv::Scalar(0, 255, 0));
+			
+			// Remove outliers by RANSAC
+			cv::Mat inlierStatus;
+			cv::findFundamentalMat(refinedPoints_l, refinedPoints_r, CV_FM_RANSAC, 3., 0.99, inlierStatus);
+			
+			std::vector<cv::KeyPoint> ransacProofKPs_l, ransacProofKPs_r;
+			for(unsigned int i = 0; i < inlierStatus.rows; ++i)
+				{
+				if(inlierStatus.ptr<bool>(i)[0])
+					{
+					ransacProofKPs_l.push_back(refinedKeyPoints_l[i]);
+					ransacProofKPs_r.push_back(refinedKeyPoints_r[i]);
+					}
+				}
+			
+			std::cout << "RANSAC proof KPs: 	" << ransacProofKPs_l.size() << std::endl << std::endl;
+			
+			// Draw Matches
+			cv::Mat imgMatches;
+			cv::drawMatches(left, keyPoints_l, right, keyPoints_r, refinedMatches, imgMatches);
+			// Draw RANSAC proof KeyPoints in red
+			cv::drawKeypoints(left, ransacProofKPs_l, left, cv::Scalar(0, 0, 200));
+			
+			stereoSub.publishCVImages(left, imgMatches);
 			}
 		
 		
