@@ -2,6 +2,7 @@
 #include <image_transport/image_transport.h>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
+#include <opencv2/video/tracking.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
@@ -116,20 +117,30 @@ int main(int argc, char** argv)
 	ros::NodeHandle nh;
 	sp_navigation::StereoSubscriber stereoSub(nh, "stereo");
 
-	cv::Mat left, right;
+	cv::Mat left, right, new_l, new_r;
 	cv::ORB oFDDE(3000);	// ORB feature detector and descriptor extractor
 	cv::BFMatcher bfMatcher(cv::NORM_HAMMING, true); // Bruteforce matcher with implemented cross-checking if second arg is 'true'
 	
-	ros::Rate loopRate(10);
+	ros::Rate loopRate(12);
 	while (ros::ok())
 		{
+		// Take time of each loop
+		double tickTime = (double)cv::getTickCount();
 		// Let ROS spin, callback methods are called
 		ros::spinOnce();
 		if (stereoSub.imgConstPtr_l_ != NULL && stereoSub.imgConstPtr_r_ != NULL)
 			{
 			// Copy new pictures
-			stereoSub.imgConstPtr_l_->image.copyTo(left);
-			stereoSub.imgConstPtr_r_->image.copyTo(right);
+			if (new_l.empty() || new_r.empty())
+				{
+				stereoSub.imgConstPtr_l_->image.copyTo(new_l);
+				stereoSub.imgConstPtr_r_->image.copyTo(new_r);
+				continue;
+				}
+			new_l.copyTo(left);
+			new_r.copyTo(right);
+			stereoSub.imgConstPtr_l_->image.copyTo(new_l);
+			stereoSub.imgConstPtr_r_->image.copyTo(new_r);
 			
 			// Detect features and compute descriptors
 			std::vector<cv::KeyPoint> keyPoints_l, keyPoints_r;
@@ -158,7 +169,6 @@ int main(int argc, char** argv)
 				}
 			std::cout << "Matches:		" << numberOfMatches << std::endl;
 			std::cout << "refined Matches:	" << refinedMatches.size() << std::endl;
-			
 			// Create Vectors containing only Points from refined matches
 			std::vector<cv::KeyPoint> refinedKeyPoints_l, refinedKeyPoints_r;
 			std::vector<cv::Point2f> refinedPoints_l, refinedPoints_r;
@@ -173,20 +183,46 @@ int main(int argc, char** argv)
 			cv::drawKeypoints(left, refinedKeyPoints_l, left, cv::Scalar(0, 255, 0));
 			
 			// Remove outliers by RANSAC
-			cv::Mat inlierStatus;
+			std::vector<unsigned char> inlierStatus;
 			cv::findFundamentalMat(refinedPoints_l, refinedPoints_r, CV_FM_RANSAC, 3., 0.99, inlierStatus);
-			
+			// Create Vectors containing only Points that have been proven consistent by RANSAC
 			std::vector<cv::KeyPoint> ransacProofKPs_l, ransacProofKPs_r;
-			for(unsigned int i = 0; i < inlierStatus.rows; ++i)
+			std::vector<cv::Point2f> ransacProofPoints_l, ransacProofPoints_r;
+			for(unsigned int i = 0; i < inlierStatus.size(); ++i)
 				{
-				if(inlierStatus.ptr<bool>(i)[0])
+				if(inlierStatus[i])
 					{
 					ransacProofKPs_l.push_back(refinedKeyPoints_l[i]);
 					ransacProofKPs_r.push_back(refinedKeyPoints_r[i]);
+					
+					ransacProofPoints_l.push_back(refinedPoints_l[i]);
+					ransacProofPoints_r.push_back(refinedPoints_r[i]);
 					}
 				}
+			std::cout << "RANSAC proof KPs: 	" << ransacProofKPs_l.size() << std::endl;
 			
-			std::cout << "RANSAC proof KPs: 	" << ransacProofKPs_l.size() << std::endl << std::endl;
+			// Track features in next set of stereo image
+			std::vector<cv::Point2f> matchedPointsNewAll_l;
+			std::vector<unsigned char> opticalFlowStatus;
+			std::vector<float> opticalFlowError;
+			cv::calcOpticalFlowPyrLK(left, new_l, ransacProofPoints_l, matchedPointsNewAll_l, opticalFlowStatus, opticalFlowError);
+			std::vector<cv::Point2f> twiceMatchedPoints_l, twiceMatchedPoints_r, matchedPointsNew_l;
+			std::vector<cv::KeyPoint> twiceMatchedKPs_l, twiceMatchedKPs_r;
+			for(unsigned int i = 0; i < opticalFlowStatus.size(); i++)
+				{
+				if(opticalFlowStatus[i])
+					{
+					twiceMatchedPoints_l.push_back(ransacProofPoints_l[i]);
+					twiceMatchedPoints_r.push_back(ransacProofPoints_r[i]);
+					
+					twiceMatchedKPs_l.push_back(ransacProofKPs_l[i]);
+					twiceMatchedKPs_r.push_back(ransacProofKPs_r[i]);
+					
+					matchedPointsNew_l.push_back(matchedPointsNewAll_l[i]);
+					}
+				}
+			std::cout << "Twice matched KPs:	" << twiceMatchedKPs_l.size() << std::endl;
+			std::cout << "Points in new img:	" << matchedPointsNew_l.size() << std::endl;
 			
 			// Draw Matches
 			cv::Mat imgMatches;
@@ -197,6 +233,8 @@ int main(int argc, char** argv)
 			stereoSub.publishCVImages(left, imgMatches);
 			}
 		
+		tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
+		std::cout << "Time used:		" << tickTime*1000 << "ms" << std::endl << std::endl;
 		
 		loopRate.sleep();
 		}
