@@ -10,7 +10,7 @@
 #include <image_transport/subscriber_filter.h>
 #include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/Image.h>
-#include <tf/transform_listener.h>
+#include <tf/transform_broadcaster.h>
 #include <image_geometry/stereo_camera_model.h>
 
 namespace sp_navigation
@@ -121,6 +121,10 @@ int main(int argc, char** argv)
 	cv::ORB oFDDE(3000);	// ORB feature detector and descriptor extractor
 	cv::BFMatcher bfMatcher(cv::NORM_HAMMING, true); // Bruteforce matcher with implemented cross-checking if second arg is 'true'
 	
+	tf::TransformBroadcaster tfBr;
+	tf::Transform tfVehiOdom;
+	tfVehiOdom.setIdentity();
+	
 	ros::Rate loopRate(12);
 	while (ros::ok())
 		{
@@ -205,7 +209,14 @@ int main(int argc, char** argv)
 			std::vector<cv::Point2f> matchedPointsNewAll_l;
 			std::vector<unsigned char> opticalFlowStatus;
 			std::vector<float> opticalFlowError;
-			cv::calcOpticalFlowPyrLK(left, new_l, ransacProofPoints_l, matchedPointsNewAll_l, opticalFlowStatus, opticalFlowError);
+			try
+				{
+				cv::calcOpticalFlowPyrLK(left, new_l, ransacProofPoints_l, matchedPointsNewAll_l, opticalFlowStatus, opticalFlowError);
+				}
+			catch(cv::Exception& e)
+				{
+				std::cout << e.what() << std::endl;
+				}
 			std::vector<cv::Point2f> twiceMatchedPoints_l, twiceMatchedPoints_r, matchedPointsNew_l;
 			std::vector<cv::KeyPoint> twiceMatchedKPs_l, twiceMatchedKPs_r;
 			for(unsigned int i = 0; i < opticalFlowStatus.size(); i++)
@@ -224,12 +235,52 @@ int main(int argc, char** argv)
 			std::cout << "Twice matched KPs:	" << twiceMatchedKPs_l.size() << std::endl;
 			std::cout << "Points in new img:	" << matchedPointsNew_l.size() << std::endl;
 			
+			// Here comes the Odometry part
+			// First try to triangulate the points, then get transform between camera poses and publish it
+			cv::Mat worldPoints, rVec, tVec;
+			const cv::Mat projectionMatrix(stereoSub.stCamModel_.left().projectionMatrix());
+			try
+				{
+				cv::triangulatePoints(projectionMatrix, stereoSub.stCamModel_.right().projectionMatrix(), twiceMatchedPoints_l, twiceMatchedPoints_r, worldPoints);
+					
+				cv::solvePnPRansac(worldPoints.rowRange(0, 3).t(), matchedPointsNew_l, projectionMatrix.colRange(0, 3), cv::noArray(), rVec, tVec, false, 500, 2.0);
+				
+				cv::Mat R;
+				cv::Rodrigues(rVec, R);
+				tf::Matrix3x3 rRos(R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2),
+									R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),
+									R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2));
+				tf::Transform tfNewOld(rRos, tf::Vector3(tVec.at<double>(0), tVec.at<double>(1), tVec.at<double>(2)));
+				tfVehiOdom *= tfNewOld;
+				}
+			catch(cv::Exception& e)
+				{
+				std::cout << e.what() << std::endl;
+				}
+			catch(...)
+				{
+				std::cout << "Something went wrong in the odomodong" << std::endl;
+				}
+			
+			
 			// Draw Matches
 			cv::Mat imgMatches;
 			cv::drawMatches(left, keyPoints_l, right, keyPoints_r, refinedMatches, imgMatches);
 			// Draw RANSAC proof KeyPoints in red
 			cv::drawKeypoints(left, ransacProofKPs_l, left, cv::Scalar(0, 0, 200));
 			
+			geometry_msgs::TransformStamped tfMessage;
+			tfMessage.header.stamp = ros::Time::now();
+			tfMessage.header.frame_id = "odom";
+			tfMessage.child_frame_id = "base_link";
+			tfMessage.transform.translation.x = tfVehiOdom.getOrigin().getX()/1000;
+			tfMessage.transform.translation.y = tfVehiOdom.getOrigin().getY()/1000;
+			tfMessage.transform.translation.z = tfVehiOdom.getOrigin().getZ()/1000;
+			tfMessage.transform.rotation.x = tfVehiOdom.getRotation().getX();
+			tfMessage.transform.rotation.y = tfVehiOdom.getRotation().getY();
+			tfMessage.transform.rotation.z = tfVehiOdom.getRotation().getZ();
+			tfMessage.transform.rotation.w = tfVehiOdom.getRotation().getW();
+			tfBr.sendTransform(tfMessage);
 			stereoSub.publishCVImages(left, imgMatches);
 			}
 		
