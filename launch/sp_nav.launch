@@ -16,11 +16,11 @@
     </node>
   </group>
   
-  <!-- Run the sp_navigation node -->
+  <!-- Run the sp_navigation node 
   <node pkg="sp_navigation" type="sp_navigation" name="short_path_navigation" args="stereo:=/apollon/vrmagic" output="screen"/>
-
+-->
   <!-- Play the bagfile -->
-  <node pkg="rosbag" type="play" name="player" args="--clock -d 1 -r 0.1 -l $(arg bagfile)" output="screen"/>
+  <node pkg="rosbag" type="play" name="player" args="--clock -d 1 -r 0.2 -l $(arg bagfile)" output="screen"/>
 
   <!-- Run external visual odometry to compare
   <node pkg="viso2_ros" type="stereo_odometer" name="stereo_odometer" output="screen">
