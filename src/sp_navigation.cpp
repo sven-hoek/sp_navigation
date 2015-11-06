@@ -10,12 +10,37 @@
 #include <image_transport/subscriber_filter.h>
 #include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/Image.h>
+#include <tf/transform_listener.h>
 #include <tf/transform_broadcaster.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/TransformStamped.h>
+#include <tf/LinearMath/Quaternion.h>
 #include <image_geometry/stereo_camera_model.h>
 #include <stdexcept>
 
 namespace sp_navigation
 {
+
+// Reconstructs a 3D point by Linear LS triangulation
+cv::Point3f triangulatePoint(cv::Point2f u, cv::Matx34d P, cv::Point2f u1, cv::Matx34d P1) 
+	{
+	cv::Matx43d A(u.x*P(2,0)-P(0,0),	u.x*P(2,1)-P(0,1),		u.x*P(2,2)-P(0,2),		
+			  u.y*P(2,0)-P(1,0),	u.y*P(2,1)-P(1,1),		u.y*P(2,2)-P(1,2),		
+			  u1.x*P1(2,0)-P1(0,0), u1.x*P1(2,1)-P1(0,1),	u1.x*P1(2,2)-P1(0,2),	
+			  u1.y*P1(2,0)-P1(1,0), u1.y*P1(2,1)-P1(1,1),	u1.y*P1(2,2)-P1(1,2)
+			  );
+	cv::Matx41d B(-(u.x*P(2,3)	-P(0,3)),
+			  -(u.y*P(2,3)	-P(1,3)),
+			  -(u1.x*P1(2,3)	-P1(0,3)),
+			  -(u1.y*P1(2,3)	-P1(1,3)));
+	
+	cv::Mat_<double> X;
+	cv::solve(A, B, X, cv::DECOMP_SVD);
+
+	cv::Point3f x(X.ptr<double>(0)[0], X.ptr<double>(1)[0], X.ptr<double>(2)[0]);
+	
+	return x;
+	}
 
 // Class for receiving and synchronizing stereo images
 class StereoSubscriber
@@ -120,6 +145,7 @@ class VisualOdometer
 		StereoSubscriber* stereoSub_ = NULL;
 		std::string parentFrame_, childFrame_;
 		unsigned int lastImgIdx_;
+		tf::TransformListener tfListener_;
 	
 	public:
 		cv::Mat imgPrev_l_, imgPrev_r_;
@@ -130,10 +156,11 @@ class VisualOdometer
 		// Points in 'current' images
 		std::vector<cv::Point2f> pointsCurr_l_;
 		
-		cv::Mat worldPoints, rVec, tVec;
+		std::vector<cv::Point3f> worldPoints;
+		tf::Transform tfBLOdom;
+		tf::Transform tfCamPreCamCur;
 		
 		tf::TransformBroadcaster tfBr_	;
-		tf::Transform tfVehiOdom_, tfNewOld_;
 		
 		/* Constructor
 		 *
@@ -146,8 +173,8 @@ class VisualOdometer
 			bfMatcher_(cv::NORM_HAMMING, true)
 			{
 			stereoSub_ = &stereoSub;
-			tfVehiOdom_.setIdentity();
-			tfNewOld_.setIdentity();
+			tfBLOdom.setIdentity();
+			tfCamPreCamCur.setIdentity();
 			}
 		
 		/* Fetches an stereo image pair from a sp_navigation::StereoSubscriber
@@ -163,7 +190,6 @@ class VisualOdometer
 					stereoSub_->imgConstPtr_l_->image.copyTo(imgCurr_l_);
 					stereoSub_->imgConstPtr_r_->image.copyTo(imgCurr_r_);
 					lastImgIdx_ = stereoSub_->imgIdx;
-					std::cout << "Erstes Mal rein, kopiere nach imgPrev" << std::endl;
 					return false;
 					}
 				else if (stereoSub_->imgIdx != lastImgIdx_)
@@ -173,7 +199,6 @@ class VisualOdometer
 					stereoSub_->imgConstPtr_l_->image.copyTo(imgCurr_l_);
 					stereoSub_->imgConstPtr_r_->image.copyTo(imgCurr_r_);
 					lastImgIdx_ = stereoSub_->imgIdx;
-					std::cout << "ImgCurr hat schon daten, rippele durch!" << std::endl;
 					return true;
 					}
 				}
@@ -270,22 +295,35 @@ class VisualOdometer
 		 * */
 		void updateRT()
 			{
-			// If images successfully updated and features matched, update tfVehiOdom with new tf, otherwise just last transform
+			// If images successfully updated and features matched, update tfVehiOdom with new tf, otherwise use last transform
 			if (getImagePair() && findMatches())
 				{
-				const cv::Mat projectionMatrix_l(stereoSub_->stCamModel_.left().projectionMatrix());
-				cv::triangulatePoints(projectionMatrix_l, stereoSub_->stCamModel_.right().projectionMatrix(), pointsPrev_l_, pointsPrev_r_, worldPoints);
+				worldPoints.clear();
+				for (unsigned int i = 0; i < pointsPrev_l_.size(); ++i)
+					{
+					cv::Point3f worldPoint = triangulatePoint(pointsPrev_l_[i], stereoSub_->stCamModel_.left().projectionMatrix(), pointsPrev_r_[i], stereoSub_->stCamModel_.right().projectionMatrix());
+					worldPoints.push_back(worldPoint);
+					}
 				
-				cv::solvePnPRansac(worldPoints.rowRange(0, 3).t(), pointsCurr_l_, projectionMatrix_l.colRange(0, 3), cv::noArray(), rVec, tVec, false, 500, 2.0);
-			
-				cv::Mat R;
-				cv::Rodrigues(rVec, R);
-				tf::Matrix3x3 rRos(R.at<double>(0,0), R.at<double>(0,1), R.at<double>(0,2),
-									R.at<double>(1,0), R.at<double>(1,1), R.at<double>(1,2),
-									R.at<double>(2,0), R.at<double>(2,1), R.at<double>(2,2));
-				tfNewOld_ = tf::Transform(rRos, tf::Vector3(tVec.at<double>(0), tVec.at<double>(1), tVec.at<double>(2)));
+				cv::Mat rVec, tVec;
+				cv::solvePnPRansac(worldPoints, pointsCurr_l_, stereoSub_->stCamModel_.left().intrinsicMatrix(), cv::noArray(), rVec, tVec, false, 500, 2.0);
+				
+//				rVec.ptr<double>(0)[0] = 0;
+//				rVec.ptr<double>(1)[0] = 0;
+//				rVec.ptr<double>(2)[0] = 0;
+//				tVec.ptr<double>(0)[0] = 0;
+//				tVec.ptr<double>(1)[0] = 0;
+//				tVec.ptr<double>(2)[0] = 0;
+				std::cout << "Ischts double? 6 = " << tVec.type() << ", " << rVec.type() << std::endl;
+				tf::Vector3 rVector(rVec.ptr<double>(0)[0], rVec.ptr<double>(1)[0], rVec.ptr<double>(2)[0]);
+				tf::Vector3 tVector(tVec.ptr<double>(0)[0], tVec.ptr<double>(1)[0], tVec.ptr<double>(2)[0]);
+				tf::Quaternion q = (rVector.length() == 0) ? tf::Quaternion::getIdentity() : tf::Quaternion(rVector, rVector.length());
+				tfCamPreCamCur = tf::Transform(q, tVector);
 				}
-			tfVehiOdom_ *= tfNewOld_;
+			tf::StampedTransform tfCamBL;
+			tfListener_.lookupTransform("base_link", "VRMAGIC", ros::Time(0), tfCamBL);
+			tf::Transform tfBLCurBLPre = tfCamBL * (tfCamPreCamCur.inverse() * tfCamBL.inverse());
+			tfBLOdom *= tfBLCurBLPre;
 			}
 		
 		/* Publishes the last found rotation and translation
@@ -293,18 +331,43 @@ class VisualOdometer
 		 * */
 		void publishTF()
 			{
+/*			tf::Vector3 rVector(rVecBO.ptr<double>(0)[0], rVecBO.ptr<double>(1)[0], rVecBO.ptr<double>(2)[0]);
+			tf::Quaternion q = (rVector.length() == 0) ? tf::Quaternion::getIdentity() : tf::Quaternion(rVector, rVector.length());
+			tf::Transform tfBO_c(q, rVector);
+
+			tf::StampedTransform tfVrBl;
+			tfListener_.lookupTransform("base_link", "VRMAGIC", ros::Time(0), tfVrBl);
+			
+			tf::Transform tfBO_b = tfBO_c * tfVrBl;
+			
+			geometry_msgs::PoseStamped cameraPose;
+			cameraPose.header.frame_id = "VRMAGIC";
+			cameraPose.pose.position.x = tVecBO.ptr<double>(0)[0];
+			cameraPose.pose.position.y = tVecBO.ptr<double>(1)[0];
+			cameraPose.pose.position.z = tVecBO.ptr<double>(2)[0];
+			cameraPose.pose.orientation.x = q.x();
+			cameraPose.pose.orientation.y = q.y();
+			cameraPose.pose.orientation.z = q.z();
+			cameraPose.pose.orientation.w = q.w();
+			
+			//geometry_msgs::TransformStamped tfCamBase = tfBuffer_.lookupTransform("VRMAGIC", "base_link	", ros::Time(0));
+			tfListener_.transformPose("base_link", cameraPose, cameraPose);
+			
 			geometry_msgs::TransformStamped tfMessage;
 			tfMessage.header.stamp = ros::Time::now();
 			tfMessage.header.frame_id = parentFrame_;
 			tfMessage.child_frame_id = childFrame_;
-			tfMessage.transform.translation.x = tfVehiOdom_.getOrigin().getX();
-			tfMessage.transform.translation.y = tfVehiOdom_.getOrigin().getY();
-			tfMessage.transform.translation.z = tfVehiOdom_.getOrigin().getZ();
-			tfMessage.transform.rotation.x = tfVehiOdom_.getRotation().getX();
-			tfMessage.transform.rotation.y = tfVehiOdom_.getRotation().getY();
-			tfMessage.transform.rotation.z = tfVehiOdom_.getRotation().getZ();
-			tfMessage.transform.rotation.w = tfVehiOdom_.getRotation().getW();
-			tfBr_.sendTransform(tfMessage);
+			
+			tfMessage.transform.translation.x = 0;//cameraPose.pose.position.x;
+			tfMessage.transform.translation.y = 0;//cameraPose.pose.position.y;
+			tfMessage.transform.translation.z = 0;//cameraPose.pose.position.z;
+			
+			tfMessage.transform.rotation.x = 1;//cameraPose.pose.orientation.x;
+			tfMessage.transform.rotation.y = 1;//cameraPose.pose.orientation.y;
+			tfMessage.transform.rotation.z = 1;//cameraPose.pose.orientation.z;
+			tfMessage.transform.rotation.w = 1;//cameraPose.pose.orientation.w;
+*/			
+			tfBr_.sendTransform(tf::StampedTransform(tfBLOdom, ros::Time::now(), "odom", "base_link"));
 			}
 	};
 
@@ -318,20 +381,35 @@ int main(int argc, char** argv)
 	sp_navigation::StereoSubscriber stereoSub(nh, "stereo");
 	sp_navigation::VisualOdometer visualOdo(stereoSub, std::string("odom"), std::string("base_link"));
 	
+	ros::Publisher posePublisher = nh.advertise<geometry_msgs::PoseStamped>("sp_navigation/Pose", 500);
+	
 	ros::Rate loopRate(12);
 	while (ros::ok())
 		{
 		// Take time of each loop
 		double tickTime = (double)cv::getTickCount();
 		ros::spinOnce();
-		
 		try
 			{
 			visualOdo.updateRT();
-			std::cout << "Featuresuche erfogreich." << std::endl;
 			std::cout << "P links  : " << visualOdo.pointsPrev_l_.size() << std::endl;
 			std::cout << "P rechts : " << visualOdo.pointsPrev_r_.size() << std::endl;
 			std::cout << "P curr_l : " << visualOdo.pointsCurr_l_.size() << std::endl;
+			visualOdo.publishTF();
+			
+/*			tf::Vector3 rVector(visualOdo.rVecBO.ptr<double>(0)[0], visualOdo.rVecBO.ptr<double>(1)[0], visualOdo.rVecBO.ptr<double>(2)[0]);
+			tf::Quaternion q = (rVector.length() == 0) ? tf::Quaternion::getIdentity() : tf::Quaternion(rVector, rVector.length());
+			geometry_msgs::PoseStamped cameraPose;
+			cameraPose.header.frame_id = "VRMAGIC";
+			cameraPose.header.stamp = ros::Time::now();
+			cameraPose.pose.position.x = visualOdo.tVecBO.ptr<double>(0)[0];
+			cameraPose.pose.position.y = visualOdo.tVecBO.ptr<double>(1)[0];
+			cameraPose.pose.position.z = visualOdo.tVecBO.ptr<double>(2)[0];
+			cameraPose.pose.orientation.x = q.x();
+			cameraPose.pose.orientation.y = q.y();
+			cameraPose.pose.orientation.z = q.z();
+			cameraPose.pose.orientation.w = q.w();
+			posePublisher.publish(cameraPose);
 /*			
 			for (unsigned int i = 0; i < visualOdo.stereoPoints_l.size(); ++i)
 				{
@@ -342,14 +420,17 @@ int main(int argc, char** argv)
 			cv::drawKeypoints(visualOdo.imgPrev_l_, visualOdo.stereoKPs_l, visualOdo.imgPrev_l_, cv::Scalar(0,0,200));
 			cv::drawKeypoints(visualOdo.imgPrev_r_, visualOdo.stereoKPs_r, visualOdo.imgPrev_r_, cv::Scalar(0,0,200));
 */			
+			cv::Mat pub_l, pub_r;
+			visualOdo.imgPrev_l_.copyTo(pub_l);
+			visualOdo.imgCurr_l_.copyTo(pub_r);
 			for (unsigned int i = 0; i < visualOdo.pointsPrev_l_.size(); ++i)
 				{
-				cv::circle(visualOdo.imgPrev_l_, visualOdo.pointsPrev_l_[i], 5, cv::Scalar(0,200,0));
-				cv::circle(visualOdo.imgCurr_l_, visualOdo.pointsCurr_l_[i], 5, cv::Scalar(0,200,0));
+				cv::circle(pub_l, visualOdo.pointsPrev_l_[i], 5, cv::Scalar(0,200,0));
+				cv::circle(pub_r, visualOdo.pointsCurr_l_[i], 5, cv::Scalar(0,200,0));
 				}
 			
 			
-			stereoSub.publishCVImages(visualOdo.imgPrev_l_, visualOdo.imgCurr_l_);
+			stereoSub.publishCVImages(pub_l, pub_r);
 			}
 		catch(std::exception& e)
 			{

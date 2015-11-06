@@ -7,7 +7,10 @@
   <!-- Setup robot: tf and robot model -->
   <node pkg="tf" type="static_transform_publisher" name="baselink_broadcaster" args="0.0971762 0.15991 0.2773538 0.49462 -0.50437 0.49653 -0.50426 base_link VRMAGIC 100" />
   <param name="robot_description" command="cat $(find robotino_description)/urdf/robotino.urdf" />
-
+  
+  <!--
+  <node pkg="tf" type="static_transform_publisher" name="odom_broadcaster" args="0 0 0 0 0 0 odom base_link 100" />
+-->
   <!-- Run the stereo image proc -->
   <group ns="$(arg camera)">
     <node pkg="stereo_image_proc" type="stereo_image_proc" name="stereo_image_proc">
@@ -16,11 +19,14 @@
     </node>
   </group>
   
-  <!-- Run the sp_navigation node 
+  <!-- Run the sp_navigation node -->
   <node pkg="sp_navigation" type="sp_navigation" name="short_path_navigation" args="stereo:=/apollon/vrmagic" output="screen"/>
--->
+  
+  <!-- Run Rviz for visualization -->
+  <node pkg="rviz" type="rviz" name="rviz"/>
+  
   <!-- Play the bagfile -->
-  <node pkg="rosbag" type="play" name="player" args="--clock -d 1 -r 0.2 -l $(arg bagfile)" output="screen"/>
+  <node pkg="rosbag" type="play" name="player" args="--clock -d 1 -r 0.05 $(arg bagfile)" output="screen"/>
 
   <!-- Run external visual odometry to compare
   <node pkg="viso2_ros" type="stereo_odometer" name="stereo_odometer" output="screen">
