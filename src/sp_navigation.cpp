@@ -300,25 +300,33 @@ class VisualOdometer
 			if (getImagePair() && findMatches())
 				{
 				// Triangulate stereo matches into 3D
-				worldPoints.clear();
+/*				worldPoints.clear();
 				for (unsigned int i = 0; i < pointsPrev_l_.size(); ++i)
 					{
 					cv::Point3f worldPoint = triangulatePoint(pointsPrev_l_[i], stereoSub_->stCamModel_.left().projectionMatrix(), pointsPrev_r_[i], stereoSub_->stCamModel_.right().projectionMatrix());
 					worldPoints.push_back(worldPoint);
 					}
+*/
+				cv::Mat worldPointMat, rVec, tVec;
+				cv::Mat projMat_l = cv::Mat(stereoSub_->stCamModel_.left().projectionMatrix());
+				cv::Mat projMat_r = cv::Mat(stereoSub_->stCamModel_.right().projectionMatrix());
+				cv::triangulatePoints(projMat_l, projMat_r, pointsPrev_l_, pointsPrev_r_, worldPointMat);
+				cv::convertPointsFromHomogeneous(worldPointMat.t(), worldPoints);
+				
 				// Get difference between current and last camera pose
-				cv::Mat rVec, tVec;
-				cv::solvePnPRansac(worldPoints, pointsCurr_l_, stereoSub_->stCamModel_.left().intrinsicMatrix(), cv::noArray(), rVec, tVec, false, 500, 2.0);
+				cv::solvePnPRansac(worldPoints, pointsCurr_l_, projMat_l.colRange(0,3), cv::noArray(), rVec, tVec, false, 500, 2.0);
+				
+				std::cout << "tVec: " << tVec << std::endl;
 				
 				// Use only values above/below a threshold and filter movements that are not possible
-				rVec.ptr<double>(0)[0] = 0;
+//				rVec.ptr<double>(0)[0] = 0;
 //				rVec.ptr<double>(1)[0] = 0;
-				rVec.ptr<double>(2)[0] = 0;
+//				rVec.ptr<double>(2)[0] = 0;
 //				tVec.ptr<double>(0)[0] = 0;
-				tVec.ptr<double>(1)[0] = 0;
+//				tVec.ptr<double>(1)[0] = 0;
 //				tVec.ptr<double>(2)[0] = 0;
 
-				for (unsigned int i=0; i<3; ++i)
+/*				for (unsigned int i=0; i<3; ++i)
 					{
 					if(std::fabs(rVec.at<double>(i)) < 0.0035 || std::fabs(rVec.at<double>(i)) > 1.5)
 						{
@@ -329,10 +337,10 @@ class VisualOdometer
 						tVec.at<double>(i)=0;
 						}
 					}
-				
+*/				
 				// Create a tf::Transform object from rVec and tvec
 				tf::Vector3 rVector(rVec.ptr<double>(0)[0], rVec.ptr<double>(1)[0], rVec.ptr<double>(2)[0]);
-				tf::Vector3 tVector(-tVec.ptr<double>(0)[0], -tVec.ptr<double>(1)[0], -tVec.ptr<double>(2)[0]);
+				tf::Vector3 tVector(tVec.ptr<double>(0)[0], tVec.ptr<double>(1)[0], tVec.ptr<double>(2)[0]);
 				tf::Quaternion q = (rVector.length() == 0) ? tf::Quaternion::getIdentity() : tf::Quaternion(rVector, rVector.length());
 				tfCamPreCamCur = tf::Transform(q, tVector);
 				}
