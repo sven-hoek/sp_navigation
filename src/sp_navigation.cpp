@@ -20,28 +20,6 @@
 
 namespace sp_navigation
 {
-
-// Reconstructs a 3D point by Linear LS triangulation
-cv::Point3f triangulatePoint(cv::Point2f u, cv::Matx34d P, cv::Point2f u1, cv::Matx34d P1) 
-	{
-	cv::Matx43d A(u.x*P(2,0)-P(0,0),	u.x*P(2,1)-P(0,1),		u.x*P(2,2)-P(0,2),		
-			  u.y*P(2,0)-P(1,0),	u.y*P(2,1)-P(1,1),		u.y*P(2,2)-P(1,2),		
-			  u1.x*P1(2,0)-P1(0,0), u1.x*P1(2,1)-P1(0,1),	u1.x*P1(2,2)-P1(0,2),	
-			  u1.y*P1(2,0)-P1(1,0), u1.y*P1(2,1)-P1(1,1),	u1.y*P1(2,2)-P1(1,2)
-			  );
-	cv::Matx41d B(-(u.x*P(2,3)	-P(0,3)),
-			  -(u.y*P(2,3)	-P(1,3)),
-			  -(u1.x*P1(2,3)	-P1(0,3)),
-			  -(u1.y*P1(2,3)	-P1(1,3)));
-	
-	cv::Mat_<double> X;
-	cv::solve(A, B, X, cv::DECOMP_SVD);
-
-	cv::Point3f x(X.ptr<double>(0)[0], X.ptr<double>(1)[0], X.ptr<double>(2)[0]);
-	
-	return x;
-	}
-
 // Class for receiving and synchronizing stereo images
 class StereoSubscriber
 	{
@@ -159,8 +137,8 @@ class VisualOdometer
 		std::vector<cv::Point3f> worldPoints;
 		tf::Transform tfBLOdom;
 		tf::Transform tfCamPreCamCur;
-		
-		tf::TransformBroadcaster tfBr_	;
+		tf::TransformBroadcaster tfBr_;
+		ros::Publisher posePub_;
 		
 		/* Constructor
 		 *
@@ -176,6 +154,8 @@ class VisualOdometer
 			stereoSub_ = &stereoSub;
 			tfBLOdom.setIdentity();
 			tfCamPreCamCur.setIdentity();
+			ros::NodeHandle nh;
+			posePub_ = nh.advertise<geometry_msgs::PoseStamped>("sp_navigation/Pose", 50);
 			}
 		
 		/* Fetches an stereo image pair from a sp_navigation::StereoSubscriber
@@ -332,7 +312,7 @@ class VisualOdometer
 						{
 						rVec.at<double>(i)=0;
 						}
-					if(std::fabs(tVec.at<double>(i)) < 0.0008 || fabs(tVec.at<double>(i)) > 0.6)
+					if(std::fabs(tVec.at<double>(i)) < 0.005 || fabs(tVec.at<double>(i)) > 0.6)
 						{
 						tVec.at<double>(i)=0;
 						}
@@ -351,12 +331,31 @@ class VisualOdometer
 			tfBLOdom *= tfBLCurBLPre;
 			}
 		
-		/* Publishes the last found rotation and translation
+		/* Publishes the TF information which is stored in the object at that moment
 		 *
 		 * */
 		void publishTF()
 			{
 			tfBr_.sendTransform(tf::StampedTransform(tfBLOdom, ros::Time::now(), parentFrame_, childFrame_));
+			}
+		
+		/* Publishes the TF information as pose message
+		 *
+		 * */
+		void publishPose()
+			{
+			geometry_msgs::PoseStamped poseMSG;
+			poseMSG.header.stamp = ros::Time::now();
+			poseMSG.header.frame_id = parentFrame_;
+			poseMSG.pose.position.x = tfBLOdom.getOrigin().getX();
+			poseMSG.pose.position.y = tfBLOdom.getOrigin().getY();
+			poseMSG.pose.position.z = tfBLOdom.getOrigin().getZ();
+			poseMSG.pose.orientation.w = tfBLOdom.getRotation().getW();
+			poseMSG.pose.orientation.x = tfBLOdom.getRotation().getX();
+			poseMSG.pose.orientation.y = tfBLOdom.getRotation().getY();
+			poseMSG.pose.orientation.z = tfBLOdom.getRotation().getZ();
+			
+			posePub_.publish(poseMSG);
 			}
 	};
 
@@ -370,7 +369,7 @@ int main(int argc, char** argv)
 	sp_navigation::StereoSubscriber stereoSub(nh, "stereo");
 	sp_navigation::VisualOdometer visualOdo(stereoSub, std::string("odom"), std::string("base_link"), std::string("VRMAGIC"));
 	
-	ros::Rate loopRate(12);
+	ros::Rate loopRate(10);
 	while (ros::ok())
 		{
 		// Take time of each loop
@@ -380,6 +379,7 @@ int main(int argc, char** argv)
 			{
 			visualOdo.updateRT();
 			visualOdo.publishTF();
+			visualOdo.publishPose();
 			tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
 			
 			// Visualize matches and publish them
