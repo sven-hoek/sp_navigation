@@ -1,25 +1,269 @@
+#include <stdexcept>
 #include <ros/ros.h>
 #include <image_transport/image_transport.h>
-#include <opencv2/core/core.hpp>
-#include <opencv2/highgui/highgui.hpp>
-#include <opencv2/video/tracking.hpp>
 #include <cv_bridge/cv_bridge.h>
+#include <opencv2/core/core.hpp>
+//#include <opencv2/highgui/highgui.hpp>
+#include <opencv2/video/tracking.hpp>
+#include <image_transport/subscriber_filter.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
 #include <message_filters/sync_policies/approximate_time.h>
-#include <image_transport/subscriber_filter.h>
+#include <image_geometry/stereo_camera_model.h>
 #include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/Image.h>
 #include <tf/transform_listener.h>
 #include <tf/transform_broadcaster.h>
+#include <tf/LinearMath/Quaternion.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TransformStamped.h>
-#include <tf/LinearMath/Quaternion.h>
-#include <image_geometry/stereo_camera_model.h>
-#include <stdexcept>
+
 
 namespace sp_navigation
 {
+// Converts openCV rVec and tVec to a ROS tf::Transform. Note that rVec, tVec must be double format.
+tf::Transform transfromFromRTVecs(const cv::Mat& rVec, const cv::Mat& tVec)
+	{
+	tf::Vector3 rVector(rVec.ptr<double>(0)[0], rVec.ptr<double>(1)[0], rVec.ptr<double>(2)[0]);
+	tf::Vector3 tVector(tVec.ptr<double>(0)[0], tVec.ptr<double>(1)[0], tVec.ptr<double>(2)[0]);
+	tf::Quaternion q = (rVector.length() == 0) ? tf::Quaternion::getIdentity() : tf::Quaternion(rVector, rVector.length());
+	return tf::Transform(q, tVector);
+	}
+
+// Represents a viewpoint, e.g. a position of a stereo camera
+struct Node
+	{
+	static cv::ORB oFDDE;	/**< ORB feature detector and descriptor extractor.*/
+	static cv::BFMatcher bfMatcher; /**< Bruteforce matcher with cross-checking of matches.*/
+	static std::vector< std::vector<cv::Point3f> > map; /**< Map consisting of Points, each with 3D information of each viewpoint */
+
+	ros::Time timestamp_; /**< Time of creation of the node. */	
+	cv::Mat projMat_l_, projMat_r_; /**< Projection Matrix of the left and right camera. */
+	std::vector<cv::KeyPoint> stereoKPs_l_, stereoKPs_r_; /**< Stereo matched Keypoints. */
+	std::vector<cv::Point2f> stereoPoints_l_, stereoPoints_r_; /**< Stereo matched Points. */
+	cv::Mat desc_l_, desc_r_; /**< Descriptors of stereo keypoints. */
+	std::vector<cv::Point3f> nodePoints_; /**< 3D Points in camera/node frame. */
+	cv::Mat rVecRel_, tVecRel_; /**< R, T to previous node. */
+	cv::Mat rVecAbs_, tVecAbs_; /**< R, T to world frame. */
+	std::vector<unsigned int> mapIdxs_; /**< Map Index. Stores at which index the KeyPoint/3D Point was put in the map. */
+	
+	/* Default Constructor. Only timestamp initialized.
+	 *
+	 * */
+	Node() : timestamp_(ros::Time::now()) {}
+	
+	/* Constructor that creates an empty node with timestamp and projection matrices.
+	 *
+	 * */
+	Node(cv::Mat& projMat_l, cv::Mat& projMat_r) :
+		timestamp_(ros::Time::now()),
+		projMat_l_(projMat_l),
+		projMat_r_(projMat_r)
+		{}
+	
+	/* Constructor that already adds stereo matched points and triangulated 3D points.
+	 *
+	 * */
+	Node(const cv::Mat& projMat_l, const cv::Mat& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r) :
+		timestamp_(ros::Time::now()),
+		projMat_l_(projMat_l),
+		projMat_r_(projMat_r)
+		{
+		pointsFromImages(img_l, img_r);
+		}
+	
+	/* Constructor that fills all information by an image pair and a previous node.
+	 * The previous node needs to have R, T and 3D points filled.
+	 *
+	 * */
+	Node(const cv::Mat& projMat_l, const cv::Mat& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r, const Node& previousNode, bool mapFromBadPose = false) :
+		timestamp_(ros::Time::now()),
+		projMat_l_(projMat_l),
+		projMat_r_(projMat_r)
+		{
+		pointsFromImages(img_l, img_r);
+		putIntoWorld(previousNode, mapFromBadPose);
+		}
+	
+	/* Generates the first Node from an image pair.
+	 *
+	 * */
+	static Node firstNode(const cv::Mat& projMat_l, const cv::Mat& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r)
+		{
+		// Create Node that already has all coordinate data filled
+		Node n(projMat_l, projMat_r, img_l, img_r);
+		// It's the first node, it practically defines the world frame
+		n.rVecRel_ = cv::Mat::zeros(3, 1, CV_64F);
+		n.tVecRel_ = cv::Mat::zeros(3, 1, CV_64F);
+		n.rVecAbs_ = cv::Mat::zeros(3, 1, CV_64F);
+		n.tVecAbs_ = cv::Mat::zeros(3, 1, CV_64F);
+		// Put all found 3D points into the map and save where they have been put (no need to transform them)
+		for (unsigned int i = 0; i < n.nodePoints_.size(); ++i)
+			{
+			map.push_back(std::vector<cv::Point3f>());
+			map[i].push_back(n.nodePoints_[i]);
+			n.mapIdxs_.push_back(i);
+			}
+		
+		return n;
+		}
+	
+	/* Matches left and right image, filters bad keypoints, stores the good ones and
+	 * calculates 3D Points from them.
+	 *
+	 * */
+	void pointsFromImages(const cv::Mat& img_l, const cv::Mat& img_r)
+		{
+		// In case this method gets called more than once, clear data first
+		stereoKPs_l_.clear();
+		stereoKPs_r_.clear();
+		stereoPoints_l_.clear();
+		stereoPoints_r_.clear();
+		desc_l_ = cv::Mat();
+		desc_r_ = cv::Mat();
+		nodePoints_.clear();
+		
+		// Detect features in left and right image
+		std::vector<cv::KeyPoint> keyPoints_l, keyPoints_r;
+		cv::Mat descriptors_l, descriptors_r;
+		oFDDE(img_l, cv::noArray(), keyPoints_l, descriptors_l);
+		oFDDE(img_r, cv::noArray(), keyPoints_r, descriptors_r);
+		
+		// Match features with a descriptor(!)-distance below a threshold
+		std::vector< std::vector<cv::DMatch> > matches;
+		bfMatcher.radiusMatch(descriptors_l, descriptors_r, matches, 35);
+		
+		// Only use matches that fulfill the epipolar constraint, thus lying on a horizontal line
+		std::vector<cv::KeyPoint> refinedKPs_l, refinedKPs_r;
+		std::vector<cv::Point2f> refinedPoints_l, refinedPoints_r;
+		cv::Mat refinedDesc_l, refinedDesc_r;
+		for(unsigned int i = 0; i < matches.size(); ++i)
+			{
+			if (matches[i].size() > 0 && fabs(keyPoints_l[matches[i][0].queryIdx].pt.y - keyPoints_r[matches[i][0].trainIdx].pt.y) <= 2)
+				{
+				refinedKPs_l.push_back(keyPoints_l[matches[i][0].queryIdx]);
+				refinedKPs_r.push_back(keyPoints_r[matches[i][0].trainIdx]);
+			
+				refinedPoints_l.push_back(keyPoints_l[matches[i][0].queryIdx].pt);
+				refinedPoints_r.push_back(keyPoints_r[matches[i][0].trainIdx].pt);
+				
+				refinedDesc_l.push_back(descriptors_l.row(matches[i][0].queryIdx));
+				refinedDesc_r.push_back(descriptors_r.row(matches[i][0].trainIdx));
+				}
+			}
+				
+		// Remove outliers by RANSAC
+		std::vector<unsigned char> inlierStatus;
+		cv::findFundamentalMat(refinedPoints_l, refinedPoints_r, CV_FM_RANSAC, 3., 0.99, inlierStatus);
+		for(unsigned int i = 0; i < inlierStatus.size(); ++i)
+			{
+			if(inlierStatus[i])
+				{
+				stereoKPs_l_.push_back(refinedKPs_l[i]);
+				stereoKPs_r_.push_back(refinedKPs_r[i]);
+				
+				stereoPoints_l_.push_back(refinedPoints_l[i]);
+				stereoPoints_r_.push_back(refinedPoints_r[i]);
+				
+				desc_l_.push_back(refinedDesc_l.row(i));
+				desc_r_.push_back(refinedDesc_r.row(i));
+				}
+			}
+		
+		// Calculate 3D points
+		cv::Mat triangulatedPointMat;
+		cv::triangulatePoints(projMat_l_, projMat_r_, stereoPoints_l_, stereoPoints_r_, triangulatedPointMat);
+		cv::convertPointsFromHomogeneous(triangulatedPointMat.t(), nodePoints_);
+		}
+		
+	/* Calculates the pose of the node and, if successful, transforms 3D points into world frame and adds them
+	 * to the map.
+	 *
+	 * */
+	bool putIntoWorld(const Node& previousNode, bool useBadPose = false)
+		{
+		// Match features with a descriptor(!)-distance below a threshold
+		std::vector< std::vector<cv::DMatch> > radiusMatches;
+		bfMatcher.radiusMatch(desc_l_, previousNode.desc_l_, radiusMatches, 35);
+		
+		// Create Vectors containing the matched points
+		std::vector<cv::Point2f> matchedPointsCurr, matchedPointsPrev;
+		std::vector<cv::Point3f> matchedNodePointsPrev;
+		std::vector<cv::DMatch> matches;
+		for(unsigned int i = 0; i < radiusMatches.size(); ++i)
+			{
+			if (radiusMatches[i].size() > 0)
+				{
+				matchedPointsCurr.push_back(stereoPoints_l_[radiusMatches[i][0].queryIdx]);
+				
+				matchedPointsPrev.push_back(previousNode.stereoPoints_l_[radiusMatches[i][0].trainIdx]);
+				matchedNodePointsPrev.push_back(previousNode.nodePoints_[radiusMatches[i][0].trainIdx]);
+				
+				matches.push_back(radiusMatches[i][0]);
+				}
+			}
+				
+		// Remove outliers by RANSAC
+		std::vector<unsigned char> inlierStatus;
+		cv::findFundamentalMat(matchedPointsCurr, matchedPointsPrev, CV_FM_RANSAC, 3., 0.99, inlierStatus);
+		std::vector<cv::Point2f> filteredMatchedPointsCurr;
+		std::vector<cv::Point3f> filteredMatchedNodePointsPrev;
+		std::vector<cv::DMatch> filteredMatches;
+		for(unsigned int i = 0; i < inlierStatus.size(); ++i)
+			{
+			if(inlierStatus[i])
+				{
+				filteredMatchedPointsCurr.push_back(matchedPointsCurr[i]);
+				filteredMatchedNodePointsPrev.push_back(matchedNodePointsPrev[i]);
+				filteredMatches.push_back(matches[i]);
+				}
+			}
+		
+		// If there are less than 5 points left return false
+		if (filteredMatchedPointsCurr.size() < 5) return false;
+		
+		// Get pose between previous and current node (tf previous->current)
+		cv::solvePnPRansac(filteredMatchedNodePointsPrev, filteredMatchedPointsCurr, projMat_l_.colRange(0,3), cv::noArray(), rVecRel_, tVecRel_, false, 500, 2.0);
+		
+		// Calculate absolute pose (tf current->world/first)
+		cv::composeRT(-rVecRel_, -tVecRel_, previousNode.rVecAbs_, previousNode.tVecAbs_, rVecAbs_, tVecAbs_);
+		
+		// Transform 3D points of this node into the world frame and add them to the map
+		cv::Mat R, RT = cv::Mat::eye(4, 4, CV_64F);
+		cv::Rodrigues(rVecAbs_, R);
+		R.copyTo(RT.colRange(0, 3).rowRange(0, 3));
+		tVecAbs_.copyTo(RT.rowRange(0, 3).col(3));
+		std::vector<cv::Point3f> worldPoints;
+		cv::perspectiveTransform(nodePoints_, worldPoints, RT);
+		for (unsigned int i = 0; i < worldPoints.size(); ++i)
+			{
+			// Check if point was already found by the last node
+			bool foundMatch = false;
+			unsigned int mapIdx;
+			for (unsigned int j = 0; j < filteredMatches.size(); ++j)
+				{
+				if (filteredMatches[j].queryIdx == i)
+					{
+					mapIdx = previousNode.mapIdxs_[filteredMatches[j].trainIdx];
+					foundMatch = true;
+					break;
+					}
+				}
+			if (!foundMatch)
+				{
+				map.push_back(std::vector<cv::Point3f>());
+				mapIdx = map.size() - 1;
+				}
+			map[mapIdx].push_back(worldPoints[i]);
+			mapIdxs_.push_back(mapIdx);
+			}
+		}
+	
+	};
+
+cv::ORB Node::oFDDE(3000);
+cv::BFMatcher Node::bfMatcher(cv::NORM_HAMMING, true); // Only cross-checked matches will be used
+
 // Class for receiving and synchronizing stereo images
 class StereoSubscriber
 	{
@@ -128,13 +372,10 @@ class VisualOdometer
 	public:
 		cv::Mat imgPrev_l_, imgPrev_r_;
 		cv::Mat imgCurr_l_, imgCurr_r_;
-		// Keypoints/points in 'previous' images
 		std::vector<cv::KeyPoint> keyPointsPrev_l_, keyPointsPrev_r_;
 		std::vector<cv::Point2f> pointsPrev_l_, pointsPrev_r_;
-		// Points in 'current' images
 		std::vector<cv::Point2f> pointsCurr_l_;
-		
-		std::vector<cv::Point3f> worldPoints;
+		std::vector<cv::Point3f> triangulatedPoints;
 		tf::Transform tfBLOdom;
 		tf::Transform tfCamPreCamCur;
 		tf::TransformBroadcaster tfBr_;
@@ -209,7 +450,7 @@ class VisualOdometer
 			oFDDE_(imgPrev_r_, cv::noArray(), keyPoints_r, descriptors_r);
 			
 			// Match features with a descriptor(!)-distance below a threshold
-			std::vector<std::vector<cv::DMatch> > matches;
+			std::vector< std::vector<cv::DMatch> > matches;
 			bfMatcher_.radiusMatch(descriptors_l, descriptors_r, matches, 35);
 			
 			// Only use matches that fulfill the epipolar constraint, thus lying on a horizontal line
@@ -279,22 +520,14 @@ class VisualOdometer
 			// If images successfully updated and features matched, update tfVehiOdom with new tf, otherwise use last transform
 			if (getImagePair() && findMatches())
 				{
-				// Triangulate stereo matches into 3D
-/*				worldPoints.clear();
-				for (unsigned int i = 0; i < pointsPrev_l_.size(); ++i)
-					{
-					cv::Point3f worldPoint = triangulatePoint(pointsPrev_l_[i], stereoSub_->stCamModel_.left().projectionMatrix(), pointsPrev_r_[i], stereoSub_->stCamModel_.right().projectionMatrix());
-					worldPoints.push_back(worldPoint);
-					}
-*/
-				cv::Mat worldPointMat, rVec, tVec;
+				cv::Mat triangulatedPointMat, rVec, tVec;
 				cv::Mat projMat_l = cv::Mat(stereoSub_->stCamModel_.left().projectionMatrix());
 				cv::Mat projMat_r = cv::Mat(stereoSub_->stCamModel_.right().projectionMatrix());
-				cv::triangulatePoints(projMat_l, projMat_r, pointsPrev_l_, pointsPrev_r_, worldPointMat);
-				cv::convertPointsFromHomogeneous(worldPointMat.t(), worldPoints);
+				cv::triangulatePoints(projMat_l, projMat_r, pointsPrev_l_, pointsPrev_r_, triangulatedPointMat);
+				cv::convertPointsFromHomogeneous(triangulatedPointMat.t(), triangulatedPoints);
 				
 				// Get difference between current and last camera pose
-				cv::solvePnPRansac(worldPoints, pointsCurr_l_, projMat_l.colRange(0,3), cv::noArray(), rVec, tVec, false, 500, 2.0);
+				cv::solvePnPRansac(triangulatedPoints, pointsCurr_l_, projMat_l.colRange(0,3), cv::noArray(), rVec, tVec, false, 500, 2.0);
 				
 				std::cout << "tVec: " << tVec << std::endl;
 				
