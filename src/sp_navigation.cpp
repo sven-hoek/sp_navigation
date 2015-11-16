@@ -107,7 +107,6 @@ struct Node
 			n.map_->at(i).push_back(n.nodePoints_[i]);
 			n.mapIdxs_.push_back(i);
 			}
-		
 		return n;
 		}
 	
@@ -169,10 +168,14 @@ struct Node
 			}
 		std::cout << "Matches found (after RANSAC):	" << stereoPoints_l_.size() << std::endl;
 		
-		// Calculate 3D points
-		cv::Mat triangulatedPointMat;
-		cv::triangulatePoints(projMat_l_, projMat_r_, stereoPoints_l_, stereoPoints_r_, triangulatedPointMat);
-		cv::convertPointsFromHomogeneous(triangulatedPointMat.t(), nodePoints_);
+		if (!stereoPoints_l_.empty())
+			{
+			// Calculate 3D points
+			cv::Mat triangulatedPointMat;
+			cv::triangulatePoints(projMat_l_, projMat_r_, stereoPoints_l_, stereoPoints_r_, triangulatedPointMat);
+			cv::convertPointsFromHomogeneous(triangulatedPointMat.t(), nodePoints_);
+			}
+		std::cout << "-> nodePoints_:			" << nodePoints_.size() << std::endl;
 		}
 		
 	/* Calculates the pose of the node and, if successful, transforms 3D points into world frame and adds them
@@ -229,6 +232,10 @@ struct Node
 			tVecRel_ = previousNode.tVecRel_;
 			}
 		else cv::solvePnPRansac(filteredMatchedNodePointsPrev, filteredMatchedPointsCurr, projMat_l_.colRange(0,3), cv::noArray(), rVecRel_, tVecRel_, false, 500, 2.0);
+		
+//		rVecRel_ = (cv::Mat_<double>(3,1) << 0., 0., 0.);
+//		tVecRel_ = (cv::Mat_<double>(3,1) << 0., 0., -0.1);
+
 		std::cout << "rVecRel_:	" << rVecRel_ << std::endl;
 		std::cout << "tVecRel_:	" << tVecRel_ << std::endl;
 		
@@ -238,7 +245,7 @@ struct Node
 		std::cout << "tVecAbs_:	" << tVecAbs_ << std::endl;
 		
 		// Check if map pointer is valid and create reference for easier access
-		if (map_ = NULL) throw std::runtime_error("Error in Node::putIntoWorld: Pointer to map_ is a NULL pointer!");
+		if (map_ == NULL) throw std::runtime_error("Error in Node::putIntoWorld: Pointer to map_ is a NULL pointer!");
 		std::vector< std::vector<cv::Point3f> >& mapRef = *map_;
 		
 		// Transform 3D points of this node into the world frame and add them to the map
@@ -248,16 +255,31 @@ struct Node
 		tVecAbs_.copyTo(RT.rowRange(0, 3).col(3));
 		std::vector<cv::Point3f> worldPoints;
 		cv::perspectiveTransform(nodePoints_, worldPoints, RT);
+		
+		std::cout << "RT:	" << std::endl << RT << std::endl;
+		
+		std::cout << "PrevNode stereoPoints_l_:	" << previousNode.stereoPoints_l_.size() << std::endl;
+		std::cout << "PrevNode stereoPoints_r_:	" << previousNode.stereoPoints_l_.size() << std::endl;
+		std::cout << "PrevNode desc_l_:		" << previousNode.desc_l_.rows << std::endl;
+		std::cout << "PrevNode desc_l_:		" << previousNode.desc_r_.rows << std::endl;
+		std::cout << "worldPoints:	" << worldPoints.size() << std::endl;
+		std::cout << "PrevNode nodePoints_:		" << previousNode.nodePoints_.size() << std::endl;
+		std::cout << std::endl << "Map size before adding new elements:	" << (*map_).size() << std::endl;
+		
 		for (unsigned int i = 0; i < worldPoints.size(); ++i)
 			{
+//			std::cout << "i =	" << i << std::endl;
 			// Check if point was already found by the last node
 			bool foundMatch = false;
-			unsigned int mapIdx;
+			unsigned int mapIdx = 0;
 			for (unsigned int j = 0; j < filteredMatches.size(); ++j)
 				{
+//				std::cout << "j =	" << j << std::endl;
 				if (filteredMatches[j].queryIdx == i)
 					{
+//					std::cout << "This point was found in previous node";
 					mapIdx = previousNode.mapIdxs_[filteredMatches[j].trainIdx];
+//					std::cout << ", mapIdx =	" << mapIdx << std::endl;
 					foundMatch = true;
 					break;
 					}
@@ -266,10 +288,13 @@ struct Node
 				{
 				mapRef.push_back(std::vector<cv::Point3f>());
 				mapIdx = mapRef.size() - 1;
+//				std::cout << "This point was not found in previous node, mapIdx =	" << mapIdx << std::endl;
 				}
 			mapRef[mapIdx].push_back(worldPoints[i]);
+//			std::cout << "worldPoint[i=" << i << "] put at mapIdx " << mapIdx << std::endl;
 			mapIdxs_.push_back(mapIdx);
 			}
+		std::cout << std::endl << "Map size after adding new elements:	" << mapRef.size() << std::endl;
 		return true;
 		}
 	
@@ -381,14 +406,16 @@ class VisualOdometer
 		unsigned int lastImgIdx_;
 		tf::TransformListener tfListener_;
 		tf::TransformBroadcaster tfBr_;
+		tf::StampedTransform tfInitialNodeBL;
 		ros::Publisher posePub_;
 	
 	public:
 		cv::Mat imgPrev_l_, imgPrev_r_;
 		cv::Mat imgCurr_l_, imgCurr_r_;
-		tf::StampedTransform currentTF_;
+//		tf::StampedTransform currentTF_;
 		std::vector<Node> nodes_;
-		std::vector< std::vector<cv::Point3f> > fullMap_;
+		std::vector<tf::Transform> transforms_;
+		std::vector< std::vector<cv::Point3f> > fullMap_; //Map containing all points (in coord system of first node)
 		
 		/* Constructor
 		 *
@@ -401,7 +428,7 @@ class VisualOdometer
 			{
 			stereoSub_ = &stereoSub;
 //			tf::Transform tf;
-			currentTF_.setIdentity();
+//			currentTF_.setIdentity();
 //			currentTF_ = tf::StampedTransform(tf, ros::Time::now(), parentFrame_, childFrame_);
 			ros::NodeHandle nh;
 			posePub_ = nh.advertise<geometry_msgs::PoseStamped>("sp_navigation/Pose", 50);
@@ -420,7 +447,7 @@ class VisualOdometer
 					stereoSub_->imgConstPtr_l_->image.copyTo(imgCurr_l_);
 					stereoSub_->imgConstPtr_r_->image.copyTo(imgCurr_r_);
 					lastImgIdx_ = stereoSub_->imgIdx;
-					std::cout << "First image received!" << std::endl;
+					std::cout << std::endl << "First image received!" << std::endl;
 					return true;
 					}
 				else if (stereoSub_->imgIdx != lastImgIdx_)
@@ -430,7 +457,7 @@ class VisualOdometer
 					stereoSub_->imgConstPtr_l_->image.copyTo(imgCurr_l_);
 					stereoSub_->imgConstPtr_r_->image.copyTo(imgCurr_r_);
 					lastImgIdx_ = stereoSub_->imgIdx;
-					std::cout << "Got new pair of images!" << std::endl;
+					std::cout << std::endl << "Got new pair of images!" << std::endl;
 					return true;
 					}
 				else return false;
@@ -449,18 +476,21 @@ class VisualOdometer
 				{
 				std::cout << "nodes_.empty() && getImagePair() -> trying to create first node!" << std::endl;
 				nodes_.push_back(Node::firstNode(fullMap_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_));
+				// Save Hand-Eye-transform of first node (node to baselink) to know where the 'first camera' was located in the world
+				// All nodes relate to position of the first node.
+				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfInitialNodeBL);
+				std::cout << std::endl << "Map filled by first node with " << fullMap_.size() << " elements." << std::endl;
 				return true;
 				}
 			else if (getImagePair())
 				{
-				std::cout << "getImagePair() == true -> trying to create new node!" << std::endl;
+				std::cout << "nodes_.empty() == false -> trying to create new node!" << std::endl;
 				Node n(fullMap_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_);
 				std::cout << "Node created." << std::endl;
 				if (n.putIntoWorld(nodes_.back(), useBadPose))
 					{
 					std::cout << "Node successfully put in relation to previous node and world, it will be added to the others!" << std::endl;
 					nodes_.push_back(n);
-					currentTF_ = tf::StampedTransform(tfFromRTVecs(n.rVecAbs_, n.tVecAbs_), n.timestamp_, parentFrame_, childFrame_);
 					return true;
 					}
 				else return false;
@@ -468,31 +498,44 @@ class VisualOdometer
 			else return true;
 			}
 		
-		/* Publishes the TF information of the last node added to the vector.
+		/* Calculates and publishes the TF information of the last node.
 		 *
 		 * */
 		void publishTF()
 			{
-			tfBr_.sendTransform(currentTF_);
-			}
-		
-		/* Publishes the TF information as pose message
-		 *
-		 * */
-		void publishPose()
-			{
-			geometry_msgs::PoseStamped poseMSG;
-			poseMSG.header.stamp = ros::Time::now();
-			poseMSG.header.frame_id = parentFrame_;
-			poseMSG.pose.position.x = currentTF_.getOrigin().getX();
-			poseMSG.pose.position.y = currentTF_.getOrigin().getY();
-			poseMSG.pose.position.z = currentTF_.getOrigin().getZ();
-			poseMSG.pose.orientation.w = currentTF_.getRotation().getW();
-			poseMSG.pose.orientation.x = currentTF_.getRotation().getX();
-			poseMSG.pose.orientation.y = currentTF_.getRotation().getY();
-			poseMSG.pose.orientation.z = currentTF_.getRotation().getZ();
+			// If there was no tf calculated for the current node, calculate it and add it to the vector
+			if (!nodes_.empty() && transforms_.size() < nodes_.size())
+				{
+				tf::Transform tfCurrNodeFirstNode = tfFromRTVecs(nodes_.back().rVecAbs_, nodes_.back().tVecAbs_);
+				
+				tf::StampedTransform tfNodeBL;
+				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
+				
+				tf::Transform tfBLOdom = tfInitialNodeBL*(tfCurrNodeFirstNode*tfNodeBL.inverse());
+				transforms_.push_back(tfBLOdom);
+				}
 			
-			posePub_.publish(poseMSG);
+			// If tf data is up to date, publish it
+			if (!nodes_.empty() && transforms_.size() == nodes_.size())
+				{
+				tf::Transform& tfBLOdom = transforms_.back();
+				tfBr_.sendTransform(tf::StampedTransform(tfBLOdom, ros::Time::now(), parentFrame_, childFrame_));
+		
+				// Also publish pose as message
+				geometry_msgs::PoseStamped poseMSG;
+				poseMSG.header.stamp = ros::Time::now();
+				poseMSG.header.frame_id = parentFrame_;
+				poseMSG.pose.position.x = tfBLOdom.getOrigin().getX();
+				poseMSG.pose.position.y = tfBLOdom.getOrigin().getY();
+				poseMSG.pose.position.z = tfBLOdom.getOrigin().getZ();
+				poseMSG.pose.orientation.w = tfBLOdom.getRotation().getW();
+				poseMSG.pose.orientation.x = tfBLOdom.getRotation().getX();
+				poseMSG.pose.orientation.y = tfBLOdom.getRotation().getY();
+				poseMSG.pose.orientation.z = tfBLOdom.getRotation().getZ();
+		
+				posePub_.publish(poseMSG);
+				}
+			else std::cout << "No tf data." << std::endl;
 			}
 	};
 
@@ -515,8 +558,7 @@ int main(int argc, char** argv)
 		try
 			{
 			visualOdo.update(false);
-			//visualOdo.publishTF();
-			//visualOdo.publishPose();
+			visualOdo.publishTF();
 			tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
 			
 /*			// Visualize matches and publish them
