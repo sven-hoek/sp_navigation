@@ -41,6 +41,7 @@ struct Node
 	cv::Mat projMat_l_, projMat_r_; /**< Projection Matrix of the left and right camera. */
 	std::vector<cv::Point2f> stereoPoints_l_, stereoPoints_r_; /**< Stereo matched Points. */
 	cv::Mat desc_l_, desc_r_; /**< Descriptors of stereo keypoints. */
+	std::vector<cv::DMatch> matchesToPrev_; /**< Matches to previous node. */
 	std::vector<cv::Point3f> nodePoints_; /**< 3D Points in camera/node frame. */
 	cv::Mat rVecRel_, tVecRel_; /**< R, T to previous node. */
 	cv::Mat rVecAbs_, tVecAbs_; /**< R, T to world frame. */
@@ -211,17 +212,16 @@ struct Node
 		cv::findFundamentalMat(matchedPointsCurr, matchedPointsPrev, CV_FM_RANSAC, 3., 0.99, inlierStatus);
 		std::vector<cv::Point2f> filteredMatchedPointsCurr;
 		std::vector<cv::Point3f> filteredMatchedNodePointsPrev;
-		std::vector<cv::DMatch> filteredMatches;
 		for(unsigned int i = 0; i < inlierStatus.size(); ++i)
 			{
 			if(inlierStatus[i])
 				{
 				filteredMatchedPointsCurr.push_back(matchedPointsCurr[i]);
 				filteredMatchedNodePointsPrev.push_back(matchedNodePointsPrev[i]);
-				filteredMatches.push_back(matches[i]);
+				matchesToPrev_.push_back(matches[i]);
 				}
 			}
-		std::cout << "Matches prev-curr after RANSAC:	" << filteredMatches.size() << std::endl;
+		std::cout << "Matches prev-curr after RANSAC:	" << matchesToPrev_.size() << std::endl;
 		
 		// Try to get pose between previous and current node (tf previous->current)
 		if (!useBadPose && filteredMatchedPointsCurr.size() < 5) return false;
@@ -257,11 +257,6 @@ struct Node
 		cv::perspectiveTransform(nodePoints_, worldPoints, RT);
 		
 		std::cout << "RT:	" << std::endl << RT << std::endl;
-		
-		std::cout << "PrevNode stereoPoints_l_:	" << previousNode.stereoPoints_l_.size() << std::endl;
-		std::cout << "PrevNode stereoPoints_r_:	" << previousNode.stereoPoints_l_.size() << std::endl;
-		std::cout << "PrevNode desc_l_:		" << previousNode.desc_l_.rows << std::endl;
-		std::cout << "PrevNode desc_l_:		" << previousNode.desc_r_.rows << std::endl;
 		std::cout << "worldPoints:	" << worldPoints.size() << std::endl;
 		std::cout << "PrevNode nodePoints_:		" << previousNode.nodePoints_.size() << std::endl;
 		std::cout << std::endl << "Map size before adding new elements:	" << (*map_).size() << std::endl;
@@ -272,13 +267,13 @@ struct Node
 			// Check if point was already found by the last node
 			bool foundMatch = false;
 			unsigned int mapIdx = 0;
-			for (unsigned int j = 0; j < filteredMatches.size(); ++j)
+			for (unsigned int j = 0; j < matchesToPrev_.size(); ++j)
 				{
 //				std::cout << "j =	" << j << std::endl;
-				if (filteredMatches[j].queryIdx == i)
+				if (matchesToPrev_[j].queryIdx == i)
 					{
 //					std::cout << "This point was found in previous node";
-					mapIdx = previousNode.mapIdxs_[filteredMatches[j].trainIdx];
+					mapIdx = previousNode.mapIdxs_[matchesToPrev_[j].trainIdx];
 //					std::cout << ", mapIdx =	" << mapIdx << std::endl;
 					foundMatch = true;
 					break;
@@ -412,10 +407,10 @@ class VisualOdometer
 	public:
 		cv::Mat imgPrev_l_, imgPrev_r_;
 		cv::Mat imgCurr_l_, imgCurr_r_;
-//		tf::StampedTransform currentTF_;
 		std::vector<Node> nodes_;
 		std::vector<tf::Transform> transforms_;
 		std::vector< std::vector<cv::Point3f> > fullMap_; //Map containing all points (in coord system of first node)
+		std::vector<cv::Point3d> map_;
 		
 		/* Constructor
 		 *
@@ -427,9 +422,6 @@ class VisualOdometer
 			lastImgIdx_(0)
 			{
 			stereoSub_ = &stereoSub;
-//			tf::Transform tf;
-//			currentTF_.setIdentity();
-//			currentTF_ = tf::StampedTransform(tf, ros::Time::now(), parentFrame_, childFrame_);
 			ros::NodeHandle nh;
 			posePub_ = nh.advertise<geometry_msgs::PoseStamped>("sp_navigation/Pose", 50);
 			}
@@ -491,6 +483,7 @@ class VisualOdometer
 					{
 					std::cout << "Node successfully put in relation to previous node and world, it will be added to the others!" << std::endl;
 					nodes_.push_back(n);
+					std::cout << "Number of nodes:	" << nodes_.size() << std::endl;
 					return true;
 					}
 				else return false;
@@ -537,6 +530,51 @@ class VisualOdometer
 				}
 			else std::cout << "No tf data." << std::endl;
 			}
+		
+		/* Calculates the mean of all points for each vector in fullMap_ and stores it in map_
+		 *
+		 * */	
+		void computeMeanMap()
+			{
+			std::cout << "Number of points per each map point:" << std::endl;
+			for (unsigned int i = 0; i < fullMap_.size(); ++i)
+				{
+				std::cout << "[" << i << "]" << fullMap_[i].size() << std::endl;
+				}
+			}
+		
+		/* draws the features/matches and publishes them
+		 *
+		 * */
+		void visualizeMatches()
+			{
+			if (nodes_.size() >= 2)
+				{
+				Node& currNode = nodes_.back();
+				Node& prevNode = nodes_[nodes_.size()-2];
+				
+				// Draw matches between previous and current node
+				for (unsigned int i = 0; i < currNode.matchesToPrev_.size(); ++i)
+					{
+					cv::Point2f& pointPrev = prevNode.stereoPoints_l_[currNode.matchesToPrev_[i].trainIdx];
+					cv::Point2f& pointCurr = currNode.stereoPoints_l_[currNode.matchesToPrev_[i].queryIdx];
+					cv::circle(imgPrev_l_, pointPrev, 1, cv::Scalar(0,200,0));
+					//cv::circle(pub_r, visualOdo.pointsCurr_l_[i], 5, cv::Scalar(0,200,200));
+					cv::line(imgPrev_l_, pointPrev, pointCurr, cv::Scalar(0,200,0));
+					}
+				
+				// Draw stereo matches
+				for (unsigned int i = 0; i < currNode.stereoPoints_l_.size(); ++i)
+					{
+					cv::Point2f& pointLeft = currNode.stereoPoints_l_[i];
+					cv::Point2f& pointRight = currNode.stereoPoints_r_[i];
+					cv::circle(imgCurr_r_, pointLeft, 1, cv::Scalar(0,153,255));
+					cv::circle(imgCurr_r_, pointRight, 1, cv::Scalar(0,255,255));
+					cv::line(imgCurr_r_, pointLeft, pointRight, cv::Scalar(255,153,0));
+					}
+				}
+			stereoSub_->publishCVImages(imgPrev_l_, imgCurr_r_);
+			}
 	};
 
 } //End of namespace
@@ -560,6 +598,7 @@ int main(int argc, char** argv)
 			visualOdo.update(false);
 			visualOdo.publishTF();
 			tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
+			visualOdo.visualizeMatches();
 			
 /*			// Visualize matches and publish them
 			cv::Mat pub_l, pub_r;
