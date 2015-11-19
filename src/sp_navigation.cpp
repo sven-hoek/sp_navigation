@@ -17,6 +17,7 @@
 #include <tf/LinearMath/Quaternion.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TransformStamped.h>
+#include <cvsba/cvsba.h>
 
 
 namespace sp_navigation
@@ -33,7 +34,7 @@ tf::Transform tfFromRTVecs(const cv::Mat& rVec, const cv::Mat& tVec)
 // Represents a viewpoint, e.g. a position of a stereo camera
 struct Node
 	{
-	static cv::ORB oFDDE;	/**< ORB feature detector and descriptor extractor.*/
+	static cv::ORB oFDDE; /**< ORB feature detector and descriptor extractor.*/
 	static cv::BFMatcher bfMatcher; /**< Bruteforce matcher with cross-checking of matches.*/
 	
 	std::vector< std::vector<cv::Point3f> >* map_; /**< Pointer to map consisting of Points, each with 3D information of each viewpoint */
@@ -129,6 +130,7 @@ struct Node
 		cv::Mat descriptors_l, descriptors_r;
 		oFDDE(img_l, cv::noArray(), keyPoints_l, descriptors_l);
 		oFDDE(img_r, cv::noArray(), keyPoints_r, descriptors_r);
+
 		std::cout << "Found features left:		" << keyPoints_l.size() << std::endl;
 		std::cout << "Found features right:		" << keyPoints_r.size() << std::endl;
 		
@@ -176,7 +178,6 @@ struct Node
 			cv::triangulatePoints(projMat_l_, projMat_r_, stereoPoints_l_, stereoPoints_r_, triangulatedPointMat);
 			cv::convertPointsFromHomogeneous(triangulatedPointMat.t(), nodePoints_);
 			}
-		std::cout << "-> nodePoints_:			" << nodePoints_.size() << std::endl;
 		}
 		
 	/* Calculates the pose of the node and, if successful, transforms 3D points into world frame and adds them
@@ -206,10 +207,12 @@ struct Node
 				}
 			}
 		std::cout << "Matches prev-curr:		" << matches.size() << std::endl;
-				
+	
+		
 		// Remove outliers by RANSAC
 		std::vector<unsigned char> inlierStatus;
-		cv::findFundamentalMat(matchedPointsCurr, matchedPointsPrev, CV_FM_RANSAC, 3., 0.99, inlierStatus);
+		if (!useBadPose && matches.size() < 5) return false;
+		else if (matches.size() >= 5) cv::findFundamentalMat(matchedPointsCurr, matchedPointsPrev, CV_FM_RANSAC, 3., 0.99, inlierStatus);
 		std::vector<cv::Point2f> filteredMatchedPointsCurr;
 		std::vector<cv::Point3f> filteredMatchedNodePointsPrev;
 		for(unsigned int i = 0; i < inlierStatus.size(); ++i)
@@ -236,13 +239,13 @@ struct Node
 //		rVecRel_ = (cv::Mat_<double>(3,1) << 0., 0., 0.);
 //		tVecRel_ = (cv::Mat_<double>(3,1) << 0., 0., -0.1);
 
-		std::cout << "rVecRel_:	" << rVecRel_ << std::endl;
-		std::cout << "tVecRel_:	" << tVecRel_ << std::endl;
+//		std::cout << "rVecRel_:	" << rVecRel_ << std::endl;
+//		std::cout << "tVecRel_:	" << tVecRel_ << std::endl;
 		
 		// Calculate absolute pose (tf current->world/first)
 		cv::composeRT(-rVecRel_, -tVecRel_, previousNode.rVecAbs_, previousNode.tVecAbs_, rVecAbs_, tVecAbs_);
-		std::cout << "rVecAbs_:	" << rVecAbs_ << std::endl;
-		std::cout << "tVecAbs_:	" << tVecAbs_ << std::endl;
+//		std::cout << "rVecAbs_:	" << rVecAbs_ << std::endl;
+//		std::cout << "tVecAbs_:	" << tVecAbs_ << std::endl;
 		
 		// Check if map pointer is valid and create reference for easier access
 		if (map_ == NULL) throw std::runtime_error("Error in Node::putIntoWorld: Pointer to map_ is a NULL pointer!");
@@ -256,10 +259,8 @@ struct Node
 		std::vector<cv::Point3f> worldPoints;
 		cv::perspectiveTransform(nodePoints_, worldPoints, RT);
 		
-		std::cout << "RT:	" << std::endl << RT << std::endl;
-		std::cout << "worldPoints:	" << worldPoints.size() << std::endl;
-		std::cout << "PrevNode nodePoints_:		" << previousNode.nodePoints_.size() << std::endl;
-		std::cout << std::endl << "Map size before adding new elements:	" << (*map_).size() << std::endl;
+//		std::cout << "RT:	" << std::endl << RT << std::endl;
+//		std::cout << std::endl << "Map size before adding new elements:	" << (*map_).size() << std::endl;
 		
 		for (unsigned int i = 0; i < worldPoints.size(); ++i)
 			{
@@ -289,7 +290,7 @@ struct Node
 //			std::cout << "worldPoint[i=" << i << "] put at mapIdx " << mapIdx << std::endl;
 			mapIdxs_.push_back(mapIdx);
 			}
-		std::cout << std::endl << "Map size after adding new elements:	" << mapRef.size() << std::endl;
+		std::cout << std::endl << "New map size:		" << mapRef.size() << std::endl;
 		return true;
 		}
 	
@@ -403,6 +404,8 @@ class VisualOdometer
 		tf::TransformBroadcaster tfBr_;
 		tf::StampedTransform tfInitialNodeBL;
 		ros::Publisher posePub_;
+		
+		unsigned int matchFails_;
 	
 	public:
 		cv::Mat imgPrev_l_, imgPrev_r_;
@@ -478,15 +481,20 @@ class VisualOdometer
 				{
 				std::cout << "nodes_.empty() == false -> trying to create new node!" << std::endl;
 				Node n(fullMap_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_);
-				std::cout << "Node created." << std::endl;
 				if (n.putIntoWorld(nodes_.back(), useBadPose))
 					{
 					std::cout << "Node successfully put in relation to previous node and world, it will be added to the others!" << std::endl;
 					nodes_.push_back(n);
 					std::cout << "Number of nodes:	" << nodes_.size() << std::endl;
+					std::cout << "Number of fails:	" << matchFails_ << std::endl;
 					return true;
 					}
-				else return false;
+				else 
+					{
+					std::cout << "<><><><><> Match failed! <><><><><><>" << std::endl;
+					matchFails_++;
+					return false;
+					}
 				}
 			else return true;
 			}
@@ -536,11 +544,33 @@ class VisualOdometer
 		 * */	
 		void computeMeanMap()
 			{
-			std::cout << "Number of points per each map point:" << std::endl;
+			map_.clear();
+			unsigned int maxSize = 0, maxIdx = 0;
+			double average = 0;
 			for (unsigned int i = 0; i < fullMap_.size(); ++i)
 				{
-				std::cout << "[" << i << "]" << fullMap_[i].size() << std::endl;
+				int size = fullMap_[i].size();
+				if (size > maxSize)
+					{
+					maxSize = size;
+					maxIdx = i;
+					}
+				average += fullMap_[i].size();
+				
+				cv::Point3d mapPoint;
+				for (unsigned int j = 0; j < fullMap_[i].size(); ++j)
+					{
+					mapPoint += cv::Point3d(fullMap_[i][j].x, fullMap_[i][j].y, fullMap_[i][j].z);
+					}
+				mapPoint *= 1/(double)fullMap_[i].size();
+				map_.push_back(mapPoint);
+				std::cout << mapPoint << std::endl;
 				}
+			average = average / fullMap_.size();
+			std::cout << "Max Size of points per point 	[" << maxIdx << "]:	" << maxSize << std::endl;
+			std::cout << "Avg Size of points per point:		" << average << std::endl;
+			std::cout << "Points in the full map:		" << fullMap_.size() << std::endl;
+			std::cout << "Points in the meanizizized map:		" << map_.size() << std::endl;
 			}
 		
 		/* draws the features/matches and publishes them
@@ -582,13 +612,26 @@ class VisualOdometer
 
 int main(int argc, char** argv)
 	{
+	int nfeatures = 3000;
+	float scaleFactor = argc > 1 ? std::atof(argv[1]) : 1.2f;
+	int nlevels = argc > 2 ? std::atoi(argv[2]) : 12;
+	int edgeThreshold = argc > 3 ? std::atoi(argv[3]) : 21;
+	int firstLevel = 0;
+	int WTA_K = argc > 4 ? std::atoi(argv[4]) : 2;
+	int norm = WTA_K == 2 ? cv::NORM_HAMMING : cv::NORM_HAMMING2;
+	int scoreType = cv::ORB::HARRIS_SCORE;
+	int patchSize = edgeThreshold;
+	
+	sp_navigation::Node::oFDDE = cv::ORB(nfeatures, scaleFactor, nlevels, edgeThreshold, firstLevel, WTA_K, scoreType, patchSize);
+	sp_navigation::Node::bfMatcher = cv::BFMatcher(norm, true); // Only cross-checked matches will be used
+	
 	ros::init(argc, argv, "sp_navigation");
 	ros::NodeHandle nh;
 	sp_navigation::StereoSubscriber stereoSub(nh, "stereo");
 	sp_navigation::VisualOdometer visualOdo(stereoSub, std::string("odom"), std::string("base_link"), std::string("VRMAGIC"));
 	
 	ros::Rate loopRate(10);
-	while (ros::ok())
+	while (ros::ok() && visualOdo.nodes_.size() < 80)
 		{
 		// Take time of each loop
 		double tickTime = (double)cv::getTickCount();
@@ -596,33 +639,9 @@ int main(int argc, char** argv)
 		try
 			{
 			visualOdo.update(false);
-			visualOdo.publishTF();
 			tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
+			visualOdo.publishTF();
 			visualOdo.visualizeMatches();
-			
-/*			// Visualize matches and publish them
-			cv::Mat pub_l, pub_r;
-			visualOdo.imgPrev_l_.copyTo(pub_l);
-			visualOdo.imgPrev_l_.copyTo(pub_r);
-			for (unsigned int i = 0; i < visualOdo.pointsPrev_l_.size(); ++i)
-				{
-				cv::circle(pub_r, visualOdo.pointsPrev_l_[i], 1, cv::Scalar(0,200,0));
-				//cv::circle(pub_r, visualOdo.pointsCurr_l_[i], 5, cv::Scalar(0,200,200));
-				cv::line(pub_r, visualOdo.pointsPrev_l_[i], visualOdo.pointsCurr_l_[i], cv::Scalar(0,200,0));
-				}
-
-			//draw lines for moving Keypoints that moved more than a threshold
-			for(int i=0; i < visualOdo.pointsPrev_l_.size(); i++)
-				{
-				cv::Point p0(std::ceil(visualOdo.pointsCurr_l_[i].x), std::ceil(visualOdo.pointsCurr_l_[i].y));
-				cv::Point p1(std::ceil(visualOdo.pointsPrev_l_[i].x), std::ceil(visualOdo.pointsPrev_l_[i].y));
-
-				double res = cv::norm(p1-p0);
-				if (res>5){
-					cv::line(pub_l, p0, p1, CV_RGB(0,255,0), 1);
-				}
-*/
-//			stereoSub.publishCVImages(pub_l, pub_r);
 			}
 		catch(std::exception& e)
 			{
@@ -637,5 +656,13 @@ int main(int argc, char** argv)
 		loopRate.sleep();
 		}
 	
-	ros::spin();
+	visualOdo.computeMeanMap();
+	
+	while (ros::ok())
+		{
+		ros::spinOnce();
+		visualOdo.publishTF();
+		visualOdo.visualizeMatches();
+		loopRate.sleep();
+		}
 	}
