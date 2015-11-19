@@ -41,12 +41,12 @@ struct Node
 	ros::Time timestamp_; /**< Time of creation of the node. */	
 	cv::Mat projMat_l_, projMat_r_; /**< Projection Matrix of the left and right camera. */
 	std::vector<cv::Point2f> stereoPoints_l_, stereoPoints_r_; /**< Stereo matched Points. */
+	std::vector<unsigned int> mapIdxs_; /**< Map Index. Stores at which index the KeyPoint/3D Point was put in the map. */
 	cv::Mat desc_l_, desc_r_; /**< Descriptors of stereo keypoints. */
 	std::vector<cv::DMatch> matchesToPrev_; /**< Matches to previous node. */
 	std::vector<cv::Point3f> nodePoints_; /**< 3D Points in camera/node frame. */
 	cv::Mat rVecRel_, tVecRel_; /**< R, T to previous node. */
 	cv::Mat rVecAbs_, tVecAbs_; /**< R, T to world frame. */
-	std::vector<unsigned int> mapIdxs_; /**< Map Index. Stores at which index the KeyPoint/3D Point was put in the map. */
 	
 	/* Default Constructor. Only timestamp initialized.
 	 *
@@ -542,7 +542,7 @@ class VisualOdometer
 		/* Calculates the mean of all points for each vector in fullMap_ and stores it in map_
 		 *
 		 * */	
-		void computeMeanMap()
+		bool computeMeanMap()
 			{
 			map_.clear();
 			unsigned int maxSize = 0, maxIdx = 0;
@@ -571,6 +571,50 @@ class VisualOdometer
 			std::cout << "Avg Size of points per point:		" << average << std::endl;
 			std::cout << "Points in the full map:		" << fullMap_.size() << std::endl;
 			std::cout << "Points in the meanizizized map:		" << map_.size() << std::endl;
+			if (map_.size() == fullMap_.size()) return true;
+			else return false;
+			}
+		
+		/* Run bundle adjustment over collected data
+		 *
+		 * */	
+		double runSBA()
+			{
+			if (computeMeanMap())
+				{
+				std::cout << "Map successfully processed. Continuing with processing of nodes." << std::endl;
+				
+				std::vector< std::vector<cv::Point2d> > imagePoints(nodes_.size());
+				std::vector< std::vector<int> > visibility(nodes_.size());
+				std::vector<cv::Mat> cameraMatrices(nodes_.size()), rVecs(nodes_.size()), tVecs(nodes_.size());
+				std::vector<cv::Mat> distCoeffs(nodes_.size(), cv::Mat::zeros(5, 1, CV_64F));
+				for (unsigned int i = 0; i < nodes_.size(); ++i)
+					{
+					std::vector<cv::Point2d> imgPointsFromOneNode(map_.size());
+					std::vector<int> visibilityFromOneNode(map_.size(), 0);
+					for (unsigned int j = 0; j < nodes_[i].mapIdxs_.size(); ++j)
+						{
+						cv::Point2f& projectedPoint = nodes_[i].stereoPoints_l_[j];
+						imgPointsFromOneNode[nodes_[i].mapIdxs_[j]] = cv::Point2d(projectedPoint.x, projectedPoint.y);
+						visibilityFromOneNode[nodes_[i].mapIdxs_[j]] = 1;
+						}
+					
+					imagePoints[i] = imgPointsFromOneNode;
+					visibility[i] = visibilityFromOneNode;
+					cameraMatrices[i] = nodes_[i].projMat_l_.colRange(0,3);
+					rVecs[i] = nodes_[i].rVecAbs_;
+					tVecs[i] = nodes_[i].tVecAbs_;
+					}
+				
+				double tickTime = (double)cv::getTickCount();
+				cvsba::Sba sba;
+				double projErr = sba.run(map_, imagePoints, visibility, cameraMatrices, rVecs, tVecs, distCoeffs);
+				tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
+				std::cout << "Time used:		" << tickTime*1000 << "ms" << std::endl << std::endl;
+				std::cout << "Initial error=" << sba.getInitialReprjError() << ". " << "Final error=" << sba.getFinalReprjError() << std::endl;
+				return projErr;
+				}
+			else return -1;
 			}
 		
 		/* draws the features/matches and publishes them
@@ -631,7 +675,7 @@ int main(int argc, char** argv)
 	sp_navigation::VisualOdometer visualOdo(stereoSub, std::string("odom"), std::string("base_link"), std::string("VRMAGIC"));
 	
 	ros::Rate loopRate(10);
-	while (ros::ok() && visualOdo.nodes_.size() < 80)
+	while (ros::ok() && visualOdo.nodes_.size() < 30)
 		{
 		// Take time of each loop
 		double tickTime = (double)cv::getTickCount();
@@ -656,13 +700,5 @@ int main(int argc, char** argv)
 		loopRate.sleep();
 		}
 	
-	visualOdo.computeMeanMap();
-	
-	while (ros::ok())
-		{
-		ros::spinOnce();
-		visualOdo.publishTF();
-		visualOdo.visualizeMatches();
-		loopRate.sleep();
-		}
+	visualOdo.runSBA();
 	}
