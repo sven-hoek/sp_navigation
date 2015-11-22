@@ -3,8 +3,9 @@
 #include <image_transport/image_transport.h>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/core/core.hpp>
-//#include <opencv2/highgui/highgui.hpp>
 #include <opencv2/video/tracking.hpp>
+#include <pcl_ros/point_cloud.h>
+#include <pcl/point_types.h>
 #include <image_transport/subscriber_filter.h>
 #include <message_filters/subscriber.h>
 #include <message_filters/synchronizer.h>
@@ -22,6 +23,9 @@
 
 namespace sp_navigation
 {
+typedef pcl::PointXYZ PointT;
+typedef pcl::PointCloud<PointT> PointCloud;
+
 // Converts openCV rVec and tVec to a ROS tf::Transform. Note that rVec, tVec must be double format.
 tf::Transform tfFromRTVecs(const cv::Mat& rVec, const cv::Mat& tVec)
 	{
@@ -29,6 +33,14 @@ tf::Transform tfFromRTVecs(const cv::Mat& rVec, const cv::Mat& tVec)
 	tf::Vector3 tVector(tVec.ptr<double>(0)[0], tVec.ptr<double>(1)[0], tVec.ptr<double>(2)[0]);
 	tf::Quaternion q = (rVector.length() == 0) ? tf::Quaternion::getIdentity() : tf::Quaternion(rVector, rVector.length());
 	return tf::Transform(q, tVector);
+	}
+
+// Converts a ROS StampedTransform to openCV rVec & tVec.
+void rtVecsFromTF(const tf::StampedTransform tf, cv::Mat& rVec, cv::Mat& tVec)
+	{
+	rVec = (cv::Mat_<double>(3,1) << tf.getRotation().getAxis().getX(), tf.getRotation().getAxis().getY(), tf.getRotation().getAxis().getZ());
+	rVec *= tf.getRotation().getAngle();
+	tVec = (cv::Mat_<double>(3,1) << tf.getOrigin().getX(), tf.getOrigin().getY(), tf.getOrigin().getZ());
 	}
 
 // Represents a viewpoint, e.g. a position of a stereo camera
@@ -112,6 +124,34 @@ struct Node
 		return n;
 		}
 	
+	/* Generates the first Node from an image pair with initial transformation.
+	 *
+	 * */
+	static Node firstNode(std::vector< std::vector<cv::Point3f> >& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r, const cv::Mat& rVec, const cv::Mat& tVec)
+		{
+		// Create Node that already has all coordinate data filled
+		Node n(map, projMat_l, projMat_r, img_l, img_r);
+		// It's the first node, it practically defines the world frame
+		n.rVecRel_ = -rVec;
+		n.tVecRel_ = -tVec;
+		n.rVecAbs_ = rVec;
+		n.tVecAbs_ = tVec;
+		// Put all found 3D points into the map after transforming them into the world frame and save where they have been put
+		cv::Mat R, RT = cv::Mat::eye(4, 4, CV_64F);
+		cv::Rodrigues(n.rVecAbs_, R);
+		R.copyTo(RT.colRange(0, 3).rowRange(0, 3));
+		n.tVecAbs_.copyTo(RT.rowRange(0, 3).col(3));
+		std::vector<cv::Point3f> worldPoints;
+		cv::perspectiveTransform(n.nodePoints_, worldPoints, RT);
+		for (unsigned int i = 0; i < worldPoints.size(); ++i)
+			{
+			n.map_->push_back(std::vector<cv::Point3f>());
+			n.map_->at(i).push_back(worldPoints[i]);
+			n.mapIdxs_.push_back(i);
+			}
+		return n;
+		}
+	
 	/* Matches left and right image, filters bad keypoints, stores the good ones and
 	 * calculates 3D Points from them.
 	 *
@@ -131,8 +171,8 @@ struct Node
 		oFDDE(img_l, cv::noArray(), keyPoints_l, descriptors_l);
 		oFDDE(img_r, cv::noArray(), keyPoints_r, descriptors_r);
 
-		std::cout << "Found features left:		" << keyPoints_l.size() << std::endl;
-		std::cout << "Found features right:		" << keyPoints_r.size() << std::endl;
+//		std::cout << "Found features left:		" << keyPoints_l.size() << std::endl;
+//		std::cout << "Found features right:		" << keyPoints_r.size() << std::endl;
 		
 		// Match features with a descriptor(!)-distance below a threshold
 		std::vector< std::vector<cv::DMatch> > matches;
@@ -152,31 +192,48 @@ struct Node
 				refinedDesc_r.push_back(descriptors_r.row(matches[i][0].trainIdx));
 				}
 			}
-		std::cout << "Matches found (on epiline):	" << refinedPoints_l.size() << std::endl;
+//		std::cout << "Matches found (on epiline):	" << refinedPoints_l.size() << std::endl;
 		
 		// Remove outliers by RANSAC
 		std::vector<unsigned char> inlierStatus;
 		cv::findFundamentalMat(refinedPoints_l, refinedPoints_r, CV_FM_RANSAC, 3., 0.99, inlierStatus);
+		std::vector<cv::Point2f> ransacProofPoints_l, ransacProofPoints_r;
+		cv::Mat ransacProofDesc_l, ransacProofDesc_r;
 		for(unsigned int i = 0; i < inlierStatus.size(); ++i)
 			{
 			if(inlierStatus[i])
 				{
+				ransacProofPoints_l.push_back(refinedPoints_l[i]);
+				ransacProofPoints_r.push_back(refinedPoints_r[i]);
 				
-				stereoPoints_l_.push_back(refinedPoints_l[i]);
-				stereoPoints_r_.push_back(refinedPoints_r[i]);
-				
-				desc_l_.push_back(refinedDesc_l.row(i));
-				desc_r_.push_back(refinedDesc_r.row(i));
+				ransacProofDesc_l.push_back(refinedDesc_l.row(i));
+				ransacProofDesc_r.push_back(refinedDesc_r.row(i));
 				}
 			}
-		std::cout << "Matches found (after RANSAC):	" << stereoPoints_l_.size() << std::endl;
+//		std::cout << "Matches found (after RANSAC):	" << stereoPoints_l_.size() << std::endl;
 		
-		if (!stereoPoints_l_.empty())
+		if (!ransacProofPoints_l.empty())
 			{
 			// Calculate 3D points
 			cv::Mat triangulatedPointMat;
-			cv::triangulatePoints(projMat_l_, projMat_r_, stereoPoints_l_, stereoPoints_r_, triangulatedPointMat);
-			cv::convertPointsFromHomogeneous(triangulatedPointMat.t(), nodePoints_);
+			std::vector<cv::Point3f> triangulatedPoints;
+			cv::triangulatePoints(projMat_l_, projMat_r_, ransacProofPoints_l, ransacProofPoints_r, triangulatedPointMat);
+			cv::convertPointsFromHomogeneous(triangulatedPointMat.t(), triangulatedPoints);
+
+			// Filter points that were put behind the camera
+			for (unsigned int i = 0; i < triangulatedPoints.size(); ++i)
+				{
+				if (triangulatedPoints[i].z > 0.2 && triangulatedPoints[i].x*triangulatedPoints[i].x + triangulatedPoints[i].y*triangulatedPoints[i].y < 1.3*triangulatedPoints[i].z*triangulatedPoints[i].z)
+					{
+					stereoPoints_l_.push_back(ransacProofPoints_l[i]);
+					stereoPoints_r_.push_back(ransacProofPoints_r[i]);
+				
+					desc_l_.push_back(ransacProofDesc_l.row(i));
+					desc_r_.push_back(ransacProofDesc_r.row(i));
+					
+					nodePoints_.push_back(triangulatedPoints[i]);
+					}
+				}
 			}
 		}
 		
@@ -206,7 +263,7 @@ struct Node
 				matches.push_back(radiusMatches[i][0]);
 				}
 			}
-		std::cout << "Matches prev-curr:		" << matches.size() << std::endl;
+//		std::cout << "Matches prev-curr:		" << matches.size() << std::endl;
 	
 		
 		// Remove outliers by RANSAC
@@ -224,7 +281,7 @@ struct Node
 				matchesToPrev_.push_back(matches[i]);
 				}
 			}
-		std::cout << "Matches prev-curr after RANSAC:	" << matchesToPrev_.size() << std::endl;
+//		std::cout << "Matches prev-curr after RANSAC:	" << matchesToPrev_.size() << std::endl;
 		
 		// Try to get pose between previous and current node (tf previous->current)
 		if (!useBadPose && filteredMatchedPointsCurr.size() < 5) return false;
@@ -404,6 +461,7 @@ class VisualOdometer
 		tf::TransformBroadcaster tfBr_;
 		tf::StampedTransform tfInitialNodeBL;
 		ros::Publisher posePub_;
+		ros::Publisher pcPub_;
 		
 		unsigned int matchFails_;
 	
@@ -413,7 +471,7 @@ class VisualOdometer
 		std::vector<Node> nodes_;
 		std::vector<tf::Transform> transforms_;
 		std::vector< std::vector<cv::Point3f> > fullMap_; //Map containing all points (in coord system of first node)
-		std::vector<cv::Point3d> map_;
+		std::vector<cv::Point3d> map_, sbaMap_;
 		
 		/* Constructor
 		 *
@@ -427,6 +485,7 @@ class VisualOdometer
 			stereoSub_ = &stereoSub;
 			ros::NodeHandle nh;
 			posePub_ = nh.advertise<geometry_msgs::PoseStamped>("sp_navigation/Pose", 50);
+			pcPub_ = nh.advertise<PointCloud>("sp_navigation/PointCloud", 50);
 			}
 		
 		/* Fetches an stereo image pair from a sp_navigation::StereoSubscriber
@@ -469,17 +528,20 @@ class VisualOdometer
 			{
 			if (nodes_.empty() && getImagePair())
 				{
-				std::cout << "nodes_.empty() && getImagePair() -> trying to create first node!" << std::endl;
-				nodes_.push_back(Node::firstNode(fullMap_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_));
 				// Save Hand-Eye-transform of first node (node to baselink) to know where the 'first camera' was located in the world
 				// All nodes relate to position of the first node.
 				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfInitialNodeBL);
+				cv::Mat rVec, tVec;
+				rtVecsFromTF(tfInitialNodeBL, rVec, tVec);
+				
+				std::cout << "nodes_.empty() && getImagePair() -> trying to create first node!" << std::endl;
+				nodes_.push_back(Node::firstNode(fullMap_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_, rVec, tVec));
 				std::cout << std::endl << "Map filled by first node with " << fullMap_.size() << " elements." << std::endl;
 				return true;
 				}
 			else if (getImagePair())
 				{
-				std::cout << "nodes_.empty() == false -> trying to create new node!" << std::endl;
+//				std::cout << "nodes_.empty() == false -> trying to create new node!" << std::endl;
 				Node n(fullMap_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_);
 				if (n.putIntoWorld(nodes_.back(), useBadPose))
 					{
@@ -512,7 +574,8 @@ class VisualOdometer
 				tf::StampedTransform tfNodeBL;
 				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
 				
-				tf::Transform tfBLOdom = tfInitialNodeBL*(tfCurrNodeFirstNode*tfNodeBL.inverse());
+//				tf::Transform tfBLOdom = tfInitialNodeBL*(tfCurrNodeFirstNode*tfNodeBL.inverse());
+				tf::Transform tfBLOdom = tfCurrNodeFirstNode*tfNodeBL.inverse();
 				transforms_.push_back(tfBLOdom);
 				}
 			
@@ -564,7 +627,7 @@ class VisualOdometer
 					}
 				mapPoint *= 1/(double)fullMap_[i].size();
 				map_.push_back(mapPoint);
-				std::cout << mapPoint << std::endl;
+//				std::cout << mapPoint << std::endl;
 				}
 			average = average / fullMap_.size();
 			std::cout << "Max Size of points per point 	[" << maxIdx << "]:	" << maxSize << std::endl;
@@ -575,6 +638,22 @@ class VisualOdometer
 			else return false;
 			}
 		
+		void publishPC()
+			{
+			if (sbaMap_.empty() ? computeMeanMap() : true)
+				{
+//				std::vector<cv::Point3f>& points = nodes_.back().nodePoints_;
+				PointCloud pointCloud;
+				pointCloud.height = 1;
+				pointCloud.width = map_.size();
+				for (unsigned int i = 0; i < map_.size(); ++i) {pointCloud.points.push_back(PointT(map_[i].x, map_[i].y, map_[i].z));}
+//				for (unsigned int i = 0; i < points.size(); ++i) {pointCloud.points.push_back(PointT(points[i].x, points[i].y, points[i].z));}
+				pointCloud.header.frame_id = parentFrame_;
+				pointCloud.header.stamp = ros::Time::now().toNSec();
+				pcPub_.publish(pointCloud);
+				}
+			}
+		
 		/* Run bundle adjustment over collected data
 		 *
 		 * */	
@@ -582,7 +661,11 @@ class VisualOdometer
 			{
 			if (computeMeanMap())
 				{
+				tf::StampedTransform tfNodeBL;
+				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
+				
 				std::cout << "Map successfully processed. Continuing with processing of nodes." << std::endl;
+				std::cout << "Last rVec, tVec before sba:		" << nodes_.back().rVecAbs_ << std::endl << nodes_.back().tVecAbs_ << std::endl;
 				
 				std::vector< std::vector<cv::Point2d> > imagePoints(nodes_.size());
 				std::vector< std::vector<int> > visibility(nodes_.size());
@@ -612,6 +695,13 @@ class VisualOdometer
 				tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
 				std::cout << "Time used:		" << tickTime*1000 << "ms" << std::endl << std::endl;
 				std::cout << "Initial error=" << sba.getInitialReprjError() << ". " << "Final error=" << sba.getFinalReprjError() << std::endl;
+				std::cout << "Last rVec, tVec after sba:		" << rVecs.back() << std::endl << tVecs.back() << std::endl;
+				
+				tf::Transform tfCurrNodeFirstNode = tfFromRTVecs(rVecs.back(), tVecs.back());
+				tf::Transform tfBLOdom = tfInitialNodeBL*(tfCurrNodeFirstNode*tfNodeBL.inverse());
+				transforms_.back() = tfBLOdom;
+				sbaMap_ = map_;
+				
 				return projErr;
 				}
 			else return -1;
@@ -675,7 +765,9 @@ int main(int argc, char** argv)
 	sp_navigation::VisualOdometer visualOdo(stereoSub, std::string("odom"), std::string("base_link"), std::string("VRMAGIC"));
 	
 	ros::Rate loopRate(10);
-	while (ros::ok() && visualOdo.nodes_.size() < 30)
+	ros::Time begin = ros::Time::now();
+	ros::Duration collDur(12.0);
+	while (ros::ok() && ros::Time::now()-begin < collDur)
 		{
 		// Take time of each loop
 		double tickTime = (double)cv::getTickCount();
@@ -685,6 +777,7 @@ int main(int argc, char** argv)
 			visualOdo.update(false);
 			tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
 			visualOdo.publishTF();
+			visualOdo.publishPC();
 			visualOdo.visualizeMatches();
 			}
 		catch(std::exception& e)
@@ -700,5 +793,12 @@ int main(int argc, char** argv)
 		loopRate.sleep();
 		}
 	
-	visualOdo.runSBA();
+	//if (ros::ok()) visualOdo.runSBA();
+	while (ros::ok())
+		{
+		visualOdo.publishTF();
+		visualOdo.publishPC();
+		visualOdo.visualizeMatches();
+		loopRate.sleep();
+		}
 	}

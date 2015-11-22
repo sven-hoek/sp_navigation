@@ -15,8 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
 )
 
 find_package(OpenCV REQUIRED)
-#find_package(PCL REQUIRED)
-#SET(CMAKE_PREFIX_PATH /usr/local/lib/cmake/)
+find_package(PCL REQUIRED)
 find_package(cvsba REQUIRED)
 
 catkin_package()
@@ -33,10 +32,10 @@ include_directories(
 	${PCL_INCLUDE_DIRS}
 )
 
-#link_directories(${PCL_LIBRARY_DIRS})
+link_directories(${PCL_LIBRARY_DIRS})
 
-#add_definitions(${PCL_DEFINITIONS})
+add_definitions(${PCL_DEFINITIONS})
 
 add_executable(sp_navigation src/sp_navigation.cpp)
-target_link_libraries(sp_navigation ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} ${cvsba_LIBS})
+target_link_libraries(sp_navigation ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} ${cvsba_LIBS} ${PCL_LIBRARIES})
 add_dependencies(sp_navigation sp_navigation_generate_messages_cpp)
