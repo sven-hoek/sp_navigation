@@ -1,9 +1,11 @@
 <launch>
   <!-- Setup the camera -->
   <arg name="camera" default="/vrmagic"/>
-  <arg name="bagfile" default="$(find sp_navigation)/data/2015-11-27-14-54-24.bag"/>
-  <param name="/use_sim_time" value="true"/>
+  <arg name="bagfile" default="$(find sp_navigation)/data/stereo_raw_meters.bag"/>
+  <param name="/use_sim_time" value="false"/>
 
+  <include file="$(find vrmagic_camera)/launch/camera.launch"/>
+  
   <!-- Setup robot: tf and robot model -->
   <node pkg="tf" type="static_transform_publisher" name="baselink_broadcaster" args="0.0971762 0.15991 0.2773538 0.49462 -0.50437 0.49653 -0.50426 base_link VRMAGIC 100" />
   <param name="robot_description" command="cat $(find robotino_description)/urdf/robotino.urdf" />
@@ -25,9 +27,6 @@
   <!-- Run imgView for visualization -->
   <include file="$(find sp_navigation)/launch/image_view.launch"/>
   
-  <!-- Play the bagfile -->
-  <node pkg="rosbag" type="play" name="player" args="--clock -d 0 -r 0.3 $(arg bagfile)"/>
-
   <!-- Run external visual odometry to compare
   <node pkg="viso2_ros" type="stereo_odometer" name="stereo_odometer" output="screen">
     <remap from="stereo" to="$(arg camera)"/>

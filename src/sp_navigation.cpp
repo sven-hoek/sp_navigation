@@ -4,6 +4,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/core/core.hpp>
 #include <opencv2/video/tracking.hpp>
+#include <opencv2/contrib/contrib.hpp>
 #include <pcl_ros/point_cloud.h>
 #include <pcl/point_types.h>
 #include <image_transport/subscriber_filter.h>
@@ -18,7 +19,7 @@
 #include <tf/LinearMath/Quaternion.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TransformStamped.h>
-#include <cvsba/cvsba.h>
+//#include <cvsba/cvsba.h>	// External library for sparse bundle adjustment
 
 
 namespace sp_navigation
@@ -26,7 +27,12 @@ namespace sp_navigation
 typedef pcl::PointXYZ PointT;
 typedef pcl::PointCloud<PointT> PointCloud;
 
-// Converts openCV rVec and tVec to a ROS tf::Transform. Note that rVec, tVec must be double format.
+/**
+ * Converts openCV rVec and tVec to a ROS tf::Transform.
+ * @param[in] rVec The rotation vector in rodrigues format. Must be of double type.
+ * @param[in] tVec The translation vector. Must be of double type.
+ * @return The resulting Transform.
+ */
 tf::Transform tfFromRTVecs(const cv::Mat& rVec, const cv::Mat& tVec)
 	{
 	tf::Vector3 rVector(rVec.ptr<double>(0)[0], rVec.ptr<double>(1)[0], rVec.ptr<double>(2)[0]);
@@ -35,7 +41,12 @@ tf::Transform tfFromRTVecs(const cv::Mat& rVec, const cv::Mat& tVec)
 	return tf::Transform(q, tVector);
 	}
 
-// Converts a ROS StampedTransform to openCV rVec & tVec.
+/**
+ * Converts a ROS StampedTransform into openCV rVec and tVec.
+ * @param[in] tf The Transform to be converted.
+ * @param[out] rVec The resulting rotation Vector of type double in Rodrigues-format.
+ * @param[out] tVec The resulting translation Vector of type double.
+ */
 void rtVecsFromTF(const tf::StampedTransform tf, cv::Mat& rVec, cv::Mat& tVec)
 	{
 	rVec = (cv::Mat_<double>(3,1) << tf.getRotation().getAxis().getX(), tf.getRotation().getAxis().getY(), tf.getRotation().getAxis().getZ());
@@ -43,44 +54,53 @@ void rtVecsFromTF(const tf::StampedTransform tf, cv::Mat& rVec, cv::Mat& tVec)
 	tVec = (cv::Mat_<double>(3,1) << tf.getOrigin().getX(), tf.getOrigin().getY(), tf.getOrigin().getZ());
 	}
 
-// Represents a viewpoint, e.g. a position of a stereo camera
+/**
+ * Node class to represent viewpoints.
+ * Each node represents a stereo camera at a certain position. It uses the right camera only for triangulating feature points
+ * and stores 2D features and their corresponding 3D points and puts them in a map.
+ */
 struct Node
 	{
 	static cv::ORB oFDDE; /**< ORB feature detector and descriptor extractor.*/
 	static cv::BFMatcher bfMatcher; /**< Bruteforce matcher with cross-checking of matches.*/
 	
 	std::vector< std::vector<cv::Point3f> >* map_; /**< Pointer to map consisting of Points, each with 3D information of each viewpoint */
-	ros::Time timestamp_; /**< Time of creation of the node. */	
 	cv::Mat projMat_l_, projMat_r_; /**< Projection Matrix of the left and right camera. */
 	std::vector<cv::Point2f> stereoPoints_l_, stereoPoints_r_; /**< Stereo matched Points. */
-	std::vector<unsigned int> mapIdxs_; /**< Map Index. Stores at which index the KeyPoint/3D Point was put in the map. */
 	cv::Mat desc_l_, desc_r_; /**< Descriptors of stereo keypoints. */
-	std::vector<cv::DMatch> matchesToPrev_; /**< Matches to previous node. */
-	std::vector<cv::Point3f> nodePoints_; /**< 3D Points in camera/node frame. */
-	cv::Mat rVecRel_, tVecRel_; /**< R, T to previous node. */
-	cv::Mat rVecAbs_, tVecAbs_; /**< R, T to world frame. */
+	std::vector<unsigned int> mapIdxs_; /**< Map Index. Stores at which index the KeyPoint/3D Point was put in the map. */
+	std::vector<cv::DMatch> matchesToPrev_; /**< Matches of stereo points to stereo points of previous node. */
+	std::vector<cv::Point3f> nodePoints_; /**< 3D Points in camera/node frame (triangulated stereoPoints). */
+	cv::Mat rVecRel_, tVecRel_; /**< rVec, tVec to previous node. */
+	cv::Mat rVecAbs_, tVecAbs_; /**< rVec, tVec to world frame ("odom"). */
 	
-	/* Default Constructor. Only timestamp initialized.
-	 *
+	/*
+	 * Default Constructor.
 	 * */
-	Node() : timestamp_(ros::Time::now()) {}
+	Node() {}
 	
-	/* Constructor that creates an empty node with timestamp and projection matrices.
-	 *
+	/*
+	 * Constructor that creates an empty node with given projection matrices.
+	 * @param[in] map Map to be filled with all Points.
+	 * @param[in] projMat_l Projection matrix for left camera.
+	 * @param[in] projmat_r projection matrix for right camera.
 	 * */
 	Node(std::vector< std::vector<cv::Point3f> >& map,const cv::Matx34d& projMat_l,const cv::Matx34d& projMat_r) :
-		timestamp_(ros::Time::now()),
 		projMat_l_(projMat_l),
 		projMat_r_(projMat_r)
 		{
 		map_ = &map;
 		}
-	
-	/* Constructor that already adds stereo matched points and triangulated 3D points.
-	 *
+ 
+	/*
+	 * Constructor that already adds stereo matched points and triangulated 3D points.
+	 * @param[in] map Map to be filled with all Points.
+	 * @param[in] projMat_l Projection matrix for left camera.
+	 * @param[in] projmat_r projection matrix for right camera.
+	 * @param[in] img_l Left camera image.
+	 * @param[in] img_r Right camera image.
 	 * */
 	Node(std::vector< std::vector<cv::Point3f> >& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r) :
-		timestamp_(ros::Time::now()),
 		projMat_l_(projMat_l),
 		projMat_r_(projMat_r)
 		{
@@ -88,12 +108,18 @@ struct Node
 		pointsFromImages(img_l, img_r);
 		}
 	
-	/* Constructor that fills all information by an image pair and a previous node.
-	 * The previous node needs to have R, T and 3D points filled.
-	 *
+	/*
+	 * Constructor that fills all information by an image pair and a previous node.
+	 * Previous node needs to have R, T, 2D and 3D points filled.
+	 * @param[in] map Map to be filled with all Points.
+	 * @param[in] projMat_l Projection matrix for left camera.
+	 * @param[in] projmat_r projection matrix for right camera.
+	 * @param[in] img_l Left camera image.
+	 * @param[in] img_r Right camera image.
+	 * @param[in] previousNode The previous node to relate this node to.
+	 * @param[in] mapFromBadPose Set this to 'true' if points still should be put into the map when there was no match to previous node.
 	 * */
 	Node(std::vector< std::vector<cv::Point3f> >& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r, const Node& previousNode, bool mapFromBadPose = false) :
-		timestamp_(ros::Time::now()),
 		projMat_l_(projMat_l),
 		projMat_r_(projMat_r)
 		{
@@ -102,8 +128,15 @@ struct Node
 		putIntoWorld(previousNode, mapFromBadPose);
 		}
 	
-	/* Generates the first Node from an image pair.
-	 *
+	/*
+	 * Generates a first node at 0.
+	 * All 3D points will be put in an own vector of map as they don't have to be matched to those of a previous node.
+	 * @param[in] map Map to be filled with all Points.
+	 * @param[in] projMat_l Projection matrix for left camera.
+	 * @param[in] projmat_r projection matrix for right camera.
+	 * @param[in] img_l Left camera image.
+	 * @param[in] img_r Right camera image.
+	 * @return The created node.
 	 * */
 	static Node firstNode(std::vector< std::vector<cv::Point3f> >& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r)
 		{
@@ -124,8 +157,19 @@ struct Node
 		return n;
 		}
 	
-	/* Generates the first Node from an image pair with initial transformation.
-	 *
+	/*
+	 * Generates a first node with a given transformation.
+	 * This is for cameras mounted on a vehicle or robot. The transformation is from the camera to the world frame so that all
+	 * 3D Points and further nodes can be transformed into the world frame.
+	 * All 3D points will be put in an own vector of map as they don't have to be matched to those of a previous node.
+	 * @param[in] map Map to be filled with all Points.
+	 * @param[in] projMat_l Projection matrix for left camera.
+	 * @param[in] projmat_r projection matrix for right camera.
+	 * @param[in] img_l Left camera image.
+	 * @param[in] img_r Right camera image.
+	 * @param[in] rVec Rotation vector of the transformation in rodrigues format. Should be of double type.
+	 * @param[in] tVec Translation vector of the transformation. Should be of double type.
+	 * @return The created node.
 	 * */
 	static Node firstNode(std::vector< std::vector<cv::Point3f> >& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r, const cv::Mat& rVec, const cv::Mat& tVec)
 		{
@@ -151,20 +195,23 @@ struct Node
 			}
 		return n;
 		}
-	
-	/* Matches left and right image, filters bad keypoints, stores the good ones and
-	 * calculates 3D Points from them.
-	 *
+
+	/*
+	 * Matches stereo images.
+	 * Matches two rectified stereo images, filters bad keypoints, stores good ones and triangulates them into 3D space.
+	 * @param[in] img_l Left camera image.
+	 * @param[in] img_r Right camera image.
 	 * */
 	void pointsFromImages(const cv::Mat& img_l, const cv::Mat& img_r)
 		{
+
 		// In case this method gets called more than once, clear data first
 		stereoPoints_l_.clear();
 		stereoPoints_r_.clear();
 		desc_l_ = cv::Mat();
 		desc_r_ = cv::Mat();
 		nodePoints_.clear();
-		
+
 		// Detect features in left and right image
 		std::vector<cv::KeyPoint> keyPoints_l, keyPoints_r;
 		cv::Mat descriptors_l, descriptors_r;
@@ -176,23 +223,30 @@ struct Node
 		
 		// Match features with a descriptor(!)-distance below a threshold
 		std::vector< std::vector<cv::DMatch> > matches;
-		bfMatcher.radiusMatch(descriptors_l, descriptors_r, matches, 35);
+		bfMatcher.radiusMatch(descriptors_l, descriptors_r, matches, 25);
 		
 		// Only use matches that fulfill the epipolar constraint, thus lying on a horizontal line
 		std::vector<cv::Point2f> refinedPoints_l, refinedPoints_r;
 		cv::Mat refinedDesc_l, refinedDesc_r;
 		for(unsigned int i = 0; i < matches.size(); ++i)
 			{
-			if (matches[i].size() > 0 && fabs(keyPoints_l[matches[i][0].queryIdx].pt.y - keyPoints_r[matches[i][0].trainIdx].pt.y) <= 2)
+			// Check if points are on epiline
+			if (matches[i].size() > 0 && fabs(keyPoints_l[matches[i][0].queryIdx].pt.y - keyPoints_r[matches[i][0].trainIdx].pt.y) <= 1)
 				{
-				refinedPoints_l.push_back(keyPoints_l[matches[i][0].queryIdx].pt);
-				refinedPoints_r.push_back(keyPoints_r[matches[i][0].trainIdx].pt);
-				
-				refinedDesc_l.push_back(descriptors_l.row(matches[i][0].queryIdx));
-				refinedDesc_r.push_back(descriptors_r.row(matches[i][0].trainIdx));
+				// Cameras are parallel -> points in left camera images have to be further right than in right camera images
+				if (keyPoints_l[matches[i][0].queryIdx].pt.x - keyPoints_r[matches[i][0].trainIdx].pt.x > 0 && keyPoints_l[matches[i][0].queryIdx].pt.x - keyPoints_r[matches[i][0].trainIdx].pt.x < 210)
+					{
+					refinedPoints_l.push_back(keyPoints_l[matches[i][0].queryIdx].pt);
+					refinedPoints_r.push_back(keyPoints_r[matches[i][0].trainIdx].pt);
+					
+					refinedDesc_l.push_back(descriptors_l.row(matches[i][0].queryIdx));
+					refinedDesc_r.push_back(descriptors_r.row(matches[i][0].trainIdx));
+					}
 				}
 			}
+
 //		std::cout << "Matches found (on epiline):	" << refinedPoints_l.size() << std::endl;
+		
 		
 		// Remove outliers by RANSAC
 		std::vector<unsigned char> inlierStatus;
@@ -210,7 +264,6 @@ struct Node
 				ransacProofDesc_r.push_back(refinedDesc_r.row(i));
 				}
 			}
-//		std::cout << "Matches found (after RANSAC):	" << stereoPoints_l_.size() << std::endl;
 		
 		if (!ransacProofPoints_l.empty())
 			{
@@ -220,10 +273,10 @@ struct Node
 			cv::triangulatePoints(projMat_l_, projMat_r_, ransacProofPoints_l, ransacProofPoints_r, triangulatedPointMat);
 			cv::convertPointsFromHomogeneous(triangulatedPointMat.t(), triangulatedPoints);
 
-			// Filter points that were put behind the camera
+//			// Filter points that were put behind the camera
 			for (unsigned int i = 0; i < triangulatedPoints.size(); ++i)
 				{
-				if (triangulatedPoints[i].z > 0.2 && triangulatedPoints[i].x*triangulatedPoints[i].x + triangulatedPoints[i].y*triangulatedPoints[i].y < 1.3*triangulatedPoints[i].z*triangulatedPoints[i].z)
+				if (triangulatedPoints[i].z < 15)
 					{
 					stereoPoints_l_.push_back(ransacProofPoints_l[i]);
 					stereoPoints_r_.push_back(ransacProofPoints_r[i]);
@@ -235,74 +288,122 @@ struct Node
 					}
 				}
 			}
+		std::cout << "Matches found (after RANSAC and >z after triang):	" << stereoPoints_l_.size() << std::endl;
 		}
 		
-	/* Calculates the pose of the node and, if successful, transforms 3D points into world frame and adds them
-	 * to the map.
-	 *
+	/*
+	 * Calculates the relation of this node to a previous node and the world.
+	 * This method compares the stereo matched features/descriptors of this node and a given node. Using the 3D points of the
+	 * previous node it uses PnP to get the relative pose from this node to the previous. Using the absolute pose of the previous
+	 * node it then calculates the absolute pose of this node.
+	 * @param[in] previousNode The node to compare this one to.
+	 * @param[in] useBadPose Set this to 'true' if points still should be put into the map when there was no match to previous node.
+	 * @return true if nodePoints_ were transformed into world frame and put into map, false if it couldn't be matched successfully.
 	 * */
 	bool putIntoWorld(const Node& previousNode, bool useBadPose = false)
 		{
 		// Match features with a descriptor(!)-distance below a threshold
 		std::vector< std::vector<cv::DMatch> > radiusMatches;
-		bfMatcher.radiusMatch(desc_l_, previousNode.desc_l_, radiusMatches, 35);
+		bfMatcher.radiusMatch(desc_l_, previousNode.desc_l_, radiusMatches, 20);
 		
 		// Create Vectors containing the matched points
-		std::vector<cv::Point2f> matchedPointsCurr, matchedPointsPrev;
-		std::vector<cv::Point3f> matchedNodePointsPrev;
-		std::vector<cv::DMatch> matches;
+		std::vector<cv::Point2f> matchedPointsCurr1, matchedPointsPrev1;
+		std::vector<cv::Point3f> matchedNodePointsPrev1;
+		std::vector<cv::DMatch> matches1;
+		std::vector<double> dist;
+		double meanDist = 0;
 		for(unsigned int i = 0; i < radiusMatches.size(); ++i)
 			{
 			if (radiusMatches[i].size() > 0)
 				{
-				matchedPointsCurr.push_back(stereoPoints_l_[radiusMatches[i][0].queryIdx]);
+				matchedPointsCurr1.push_back(stereoPoints_l_[radiusMatches[i][0].queryIdx]);
 				
-				matchedPointsPrev.push_back(previousNode.stereoPoints_l_[radiusMatches[i][0].trainIdx]);
-				matchedNodePointsPrev.push_back(previousNode.nodePoints_[radiusMatches[i][0].trainIdx]);
+				matchedPointsPrev1.push_back(previousNode.stereoPoints_l_[radiusMatches[i][0].trainIdx]);
+				matchedNodePointsPrev1.push_back(previousNode.nodePoints_[radiusMatches[i][0].trainIdx]);
 				
-				matches.push_back(radiusMatches[i][0]);
+				matches1.push_back(radiusMatches[i][0]);
+				
+				double xDist = stereoPoints_l_[radiusMatches[i][0].queryIdx].x - previousNode.stereoPoints_l_[radiusMatches[i][0].trainIdx].x;
+				double yDist = stereoPoints_l_[radiusMatches[i][0].queryIdx].y - previousNode.stereoPoints_l_[radiusMatches[i][0].trainIdx].y;
+				// Add all distances up to calculate the mean
+				double d = std::sqrt(xDist*xDist + yDist*yDist);
+				dist.push_back(d);
+				meanDist += d;
 				}
 			}
-//		std::cout << "Matches prev-curr:		" << matches.size() << std::endl;
-	
+		meanDist = meanDist/matches1.size();
+		std::cout << "meanDist prev-curr:		" << meanDist << std::endl;
+		std::cout << "Matches1 prev-curr:		" << matches1.size() << std::endl;
 		
-		// Remove outliers by RANSAC
+		// Only use matches that are below 2*meanDist to eliminate wrong matches
+		std::vector<cv::Point2f> matchedPointsCurr, matchedPointsPrev;
+		std::vector<cv::Point3f> matchedNodePointsPrev;
+		std::vector<cv::DMatch> matches;
+		for(unsigned int i = 0; i < matches1.size(); ++i)
+			{
+			if (dist[i] < 2.*meanDist)
+				{
+				matchedPointsCurr.push_back(matchedPointsCurr1[i]);
+				matchedPointsPrev.push_back(matchedPointsPrev1[i]);
+				matchedNodePointsPrev.push_back(matchedNodePointsPrev1[i]);
+				matches.push_back(matches1[i]);
+				}
+			}
+		std::cout << "Matches prev-curr:		" << matches.size() << std::endl;
+		
+		// Remove outliers by double RANSAC to yield better results
+		std::vector<unsigned char> inlierStatus1;
+		if (!useBadPose && matches.size() < 8) return false;
+		else if (matches.size() >= 8) cv::findFundamentalMat(matchedPointsCurr, matchedPointsPrev, CV_FM_RANSAC, 1., 0.99, inlierStatus1);
+		std::vector<cv::Point2f> filteredMatchedPointsCurr1, filteredMatchedPointsPrev1;
+		std::vector<cv::Point3f> filteredMatchedNodePointsPrev1;
+		std::vector<cv::DMatch> matchesToPrev;
+		for(unsigned int i = 0; i < inlierStatus1.size(); ++i)
+			{
+			if(inlierStatus1[i])
+				{
+				filteredMatchedPointsCurr1.push_back(matchedPointsCurr[i]);
+				filteredMatchedPointsPrev1.push_back(matchedPointsPrev[i]);
+				filteredMatchedNodePointsPrev1.push_back(matchedNodePointsPrev[i]);
+				matchesToPrev.push_back(matches[i]);
+				}
+			}
+		std::cout << "Matches prev-curr after RANSAC1:	" << matchesToPrev.size() << std::endl;
+		
+		
 		std::vector<unsigned char> inlierStatus;
-		if (!useBadPose && matches.size() < 5) return false;
-		else if (matches.size() >= 5) cv::findFundamentalMat(matchedPointsCurr, matchedPointsPrev, CV_FM_RANSAC, 3., 0.99, inlierStatus);
+		if (!useBadPose && matchesToPrev.size() < 8) return false;
+		else if (matchesToPrev.size() >= 8) cv::findFundamentalMat(filteredMatchedPointsCurr1, filteredMatchedPointsPrev1, CV_FM_RANSAC, 1., 0.99, inlierStatus);
 		std::vector<cv::Point2f> filteredMatchedPointsCurr;
 		std::vector<cv::Point3f> filteredMatchedNodePointsPrev;
 		for(unsigned int i = 0; i < inlierStatus.size(); ++i)
 			{
 			if(inlierStatus[i])
 				{
-				filteredMatchedPointsCurr.push_back(matchedPointsCurr[i]);
-				filteredMatchedNodePointsPrev.push_back(matchedNodePointsPrev[i]);
-				matchesToPrev_.push_back(matches[i]);
+				filteredMatchedPointsCurr.push_back(filteredMatchedPointsCurr1[i]);
+				filteredMatchedNodePointsPrev.push_back(filteredMatchedNodePointsPrev1[i]);
+				matchesToPrev_.push_back(matchesToPrev[i]);
 				}
 			}
-//		std::cout << "Matches prev-curr after RANSAC:	" << matchesToPrev_.size() << std::endl;
+		std::cout << "Matches prev-curr after RANSAC2:	" << matchesToPrev_.size() << std::endl;
 		
 		// Try to get pose between previous and current node (tf previous->current)
-		if (!useBadPose && filteredMatchedPointsCurr.size() < 5) return false;
-		else if (useBadPose && filteredMatchedPointsCurr.size() < 5)
+		if (!useBadPose && filteredMatchedPointsCurr.size() < 8) return false;
+		else if (useBadPose && filteredMatchedPointsCurr.size() < 8)
 			{
 			std::cout << "Found less than 5 matches. useBadPose == true -> using rVec, tVec of previous node." << std::endl;
 			rVecRel_ = previousNode.rVecRel_;
 			tVecRel_ = previousNode.tVecRel_;
 			}
 		else cv::solvePnPRansac(filteredMatchedNodePointsPrev, filteredMatchedPointsCurr, projMat_l_.colRange(0,3), cv::noArray(), rVecRel_, tVecRel_, false, 500, 2.0);
-		
-//		rVecRel_ = (cv::Mat_<double>(3,1) << 0., 0., 0.);
-//		tVecRel_ = (cv::Mat_<double>(3,1) << 0., 0., -0.1);
 
-//		std::cout << "rVecRel_:	" << rVecRel_ << std::endl;
-//		std::cout << "tVecRel_:	" << tVecRel_ << std::endl;
+		std::cout << "rVecRel_:	" << rVecRel_ << std::endl;
+		std::cout << "tVecRel_:	" << tVecRel_ << std::endl;
 		
 		// Calculate absolute pose (tf current->world/first)
 		cv::composeRT(-rVecRel_, -tVecRel_, previousNode.rVecAbs_, previousNode.tVecAbs_, rVecAbs_, tVecAbs_);
-//		std::cout << "rVecAbs_:	" << rVecAbs_ << std::endl;
-//		std::cout << "tVecAbs_:	" << tVecAbs_ << std::endl;
+		std::cout << "rVecAbs_:	" << rVecAbs_ << std::endl;
+		std::cout << "tVecAbs_:	" << tVecAbs_ << std::endl;
 		
 		// Check if map pointer is valid and create reference for easier access
 		if (map_ == NULL) throw std::runtime_error("Error in Node::putIntoWorld: Pointer to map_ is a NULL pointer!");
@@ -330,7 +431,7 @@ struct Node
 //				std::cout << "j =	" << j << std::endl;
 				if (matchesToPrev_[j].queryIdx == i)
 					{
-//					std::cout << "This point was found in previous node";
+//					std::cout << "This feature was already found in previous node";
 					mapIdx = previousNode.mapIdxs_[matchesToPrev_[j].trainIdx];
 //					std::cout << ", mapIdx =	" << mapIdx << std::endl;
 					foundMatch = true;
@@ -341,7 +442,7 @@ struct Node
 				{
 				mapRef.push_back(std::vector<cv::Point3f>());
 				mapIdx = mapRef.size() - 1;
-//				std::cout << "This point was not found in previous node, mapIdx =	" << mapIdx << std::endl;
+//				std::cout << "This feature was not found in previous node, mapIdx =	" << mapIdx << std::endl;
 				}
 			mapRef[mapIdx].push_back(worldPoints[i]);
 //			std::cout << "worldPoint[i=" << i << "] put at mapIdx " << mapIdx << std::endl;
@@ -356,13 +457,16 @@ struct Node
 cv::ORB Node::oFDDE(3000);
 cv::BFMatcher Node::bfMatcher(cv::NORM_HAMMING, true); // Only cross-checked matches will be used
 
-// Class for receiving and synchronizing stereo images
+/**
+ * Class for synchronized image subscribing
+ * This class subscribes to each two camera image and info topics and stores the data until new data was received.
+ */
 class StereoSubscriber
 	{
 	private:
-		image_transport::ImageTransport it_;
+		image_transport::ImageTransport it_; /**< Image transport handle. */
 		image_transport::SubscriberFilter imgSub_l_; /**< Left image msg. */
-		image_transport::SubscriberFilter imgSub_r_; /**< right image msg. */
+		image_transport::SubscriberFilter imgSub_r_; /**< Right image msg. */
 		message_filters::Subscriber<sensor_msgs::CameraInfo> camInfoSub_l_; /**< Left camera info msg. */
 		message_filters::Subscriber<sensor_msgs::CameraInfo> camInfoSub_r_; /**< Right camera info msg. */
 		message_filters::Synchronizer<message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image, sensor_msgs::CameraInfo, sensor_msgs::CameraInfo> > sync_; /**< Stereo topic synchronizer. */
@@ -370,14 +474,16 @@ class StereoSubscriber
 		image_transport::Publisher imgPub_r_; /**< Right image publisher. */
 
 	public:
-		image_geometry::StereoCameraModel stCamModel_;
-		cv_bridge::CvImageConstPtr imgConstPtr_l_;
-		cv_bridge::CvImageConstPtr imgConstPtr_r_;
+		image_geometry::StereoCameraModel stCamModel_; /**< StereoCameraModel with newest data */
+		cv_bridge::CvImageConstPtr imgConstPtr_l_; /**< Pointer to current left image data */
+		cv_bridge::CvImageConstPtr imgConstPtr_r_; /**< Pointer to current right image data */
 		unsigned int imgIdx;
 
 
-		/* Constructor
-		 *
+		/*
+		 * Constructor.
+		 * @param[in] nh The nodehandle to use.
+		 * @param[in] nameToResolve Name of the stereo namespace to use.
 		 * */
 		StereoSubscriber(ros::NodeHandle& nh, const std::string nameToResolve) :
 			it_(nh),
@@ -400,8 +506,14 @@ class StereoSubscriber
 			imgPub_r_ = it_.advertise("sp_navigation/right/image_mono", 1);
 			}
 
-		/* Callback method for synchronized stereo images
-		 *
+
+		 /*
+		 * Callback method for synchronized stereo images
+		 * Converts ROS image messages to openCV images and stores them in member variables.
+		 * @param[in] lImage Pointer to left image.
+		 * @param[in] rImage Pointer to right image.
+		 * @param[in] lCamInfo Pointer to left camera info.
+		 * @param[in] rCamInfo Pointer to right camera info.
 		 * */
 		void syncCallback(const sensor_msgs::Image::ConstPtr& lImage, const sensor_msgs::Image::ConstPtr& rImage, const sensor_msgs::CameraInfo::ConstPtr& lCamInfo, const sensor_msgs::CameraInfo::ConstPtr& rCamInfo)
 			{
@@ -426,8 +538,10 @@ class StereoSubscriber
 			}
 
 
-		/* Simple method to publish cv::Mat images
-		 *
+		/*
+		 * Simple method to publish two openCV images in two ROS topics.
+		 * @param[in] lImage Left image to publish.
+		 * @param[in] rImage Right image to publish.
 		 * */
 		void publishCVImages(const cv::Mat& lImage, const cv::Mat& rImage)
 			{
@@ -450,31 +564,40 @@ class StereoSubscriber
 			}
 	};
 
-// Class for computing odometry from stereo images
+/**
+ * Class for visual odometry from stereo images.
+ */
 class VisualOdometer
 	{
 	private:
-		StereoSubscriber* stereoSub_ = NULL;
-		std::string parentFrame_, childFrame_, cameraFrame_;
-		unsigned int lastImgIdx_;
-		tf::TransformListener tfListener_;
-		tf::TransformBroadcaster tfBr_;
-		tf::StampedTransform tfInitialNodeBL;
-		ros::Publisher posePub_;
-		ros::Publisher pcPub_;
-		
-		unsigned int matchFails_;
+		StereoSubscriber* stereoSub_ = NULL; /**< Pointer to stereoSubscriber to get new images from. */
+		std::string parentFrame_; /**< Name of the world frame. */
+		std::string childFrame_; /**< Name of the baselink frame. */
+		std::string cameraFrame_; /**< Name of the camera frame. */
+		unsigned int lastImgIdx_; /**< Index oof last image received. */
+		tf::TransformListener tfListener_; /**< TransformListener to receive tf data. */
+		tf::TransformBroadcaster tfBr_; /**< TransformBroadcaster to send tf data. */
+		ros::Publisher posePub_; /**< Pose publisher. */
+		ros::Publisher pcPub_; /**< PointCloud publisher. */
+		unsigned int matchFails_; /**< Number of failed matches. */
 	
 	public:
-		cv::Mat imgPrev_l_, imgPrev_r_;
-		cv::Mat imgCurr_l_, imgCurr_r_;
-		std::vector<Node> nodes_;
-		std::vector<tf::Transform> transforms_;
-		std::vector< std::vector<cv::Point3f> > fullMap_; //Map containing all points (in coord system of first node)
-		std::vector<cv::Point3d> map_, sbaMap_;
+		cv::Mat imgPrev_l_; /**< Previous left image. */
+		cv::Mat imgPrev_r_; /**< Previous right image. */
+		cv::Mat imgCurr_l_; /**< Current left image. */
+		cv::Mat imgCurr_r_; /**< Current right image. */
+		std::vector<Node> nodes_; /**< Contains all created nodes. */
+		std::vector<tf::Transform> transforms_; /**< Contains all calculated Transforms (corresponding to nodes from nodes_). */
+		std::vector< std::vector<cv::Point3f> > fullMap_; /**< Map containing all 3D Points (in world frame) */
+		std::vector<cv::Point3d> map_; /**< Map with mean Points. */
+		std::vector<cv::Point3d> sbaMap_; /**< Map after sBA. */
 		
-		/* Constructor
-		 *
+		/*
+		 * Constructor.
+		 * @param[in] stereoSub The stereoSubscriber to get the images from.
+		 * @param[in] parentFrame Name of the world frame.
+		 * @param[in] childFrame Name of the baselink frame.
+		 * @param[in] cameraFrame Name of the camera frame.
 		 * */
 		VisualOdometer(StereoSubscriber& stereoSub, std::string parentFrame, std::string childFrame, std::string cameraFrame) :
 			parentFrame_(parentFrame),
@@ -488,8 +611,9 @@ class VisualOdometer
 			pcPub_ = nh.advertise<PointCloud>("sp_navigation/PointCloud", 50);
 			}
 		
-		/* Fetches an stereo image pair from a sp_navigation::StereoSubscriber
-		 * returns true if a new pair of pictures was received and successfully updated
+		/*
+		 * Grabs an image pair from the StereoSubscriber.
+		 * @return true if new pair of pictures was received and successfully updated, false otherwise.
 		 * */
 		bool getImagePair()
 			{
@@ -524,12 +648,19 @@ class VisualOdometer
 		 * the vector of nodes. This method returns 'false' only if the pose of the new node could not be computed.
 		 *
 		 * */
+		/*
+		 * Creates a new node if a new pair of images could be grabbed from the StereoSubscriber.
+		 * Checks if there are new images available in the StereoSubscriber and if so creates a new node.
+		 * @param useBadPose If true, 3D points from bad poses will be used in the map.
+		 * @see Node::putIntoWorld()
+		 * @return 'true' if nothing happened (no new images) or node successfully created, 'false' if match to previous node failed.
+		 * */
 		bool update(bool useBadPose = false)
 			{
 			if (nodes_.empty() && getImagePair())
 				{
-				// Save Hand-Eye-transform of first node (node to baselink) to know where the 'first camera' was located in the world
-				// All nodes relate to position of the first node.
+				// Get Hand-Eye-transform of first node (node to baselink) to know where the 'first camera' was located in the world
+				tf::StampedTransform tfInitialNodeBL;
 				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfInitialNodeBL);
 				cv::Mat rVec, tVec;
 				rtVecsFromTF(tfInitialNodeBL, rVec, tVec);
@@ -564,6 +695,10 @@ class VisualOdometer
 		/* Calculates and publishes the TF information of the last node.
 		 *
 		 * */
+		/*
+		 * Publishes tf data and pose.
+		 * Computes the baselink pose from the current camera pose if not yet computed and publishes it.
+		 * */
 		void publishTF()
 			{
 			// If there was no tf calculated for the current node, calculate it and add it to the vector
@@ -571,10 +706,10 @@ class VisualOdometer
 				{
 				tf::Transform tfCurrNodeFirstNode = tfFromRTVecs(nodes_.back().rVecAbs_, nodes_.back().tVecAbs_);
 				
+				// Look up current hand-eye-transformation
 				tf::StampedTransform tfNodeBL;
 				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
 				
-//				tf::Transform tfBLOdom = tfInitialNodeBL*(tfCurrNodeFirstNode*tfNodeBL.inverse());
 				tf::Transform tfBLOdom = tfCurrNodeFirstNode*tfNodeBL.inverse();
 				transforms_.push_back(tfBLOdom);
 				}
@@ -604,7 +739,11 @@ class VisualOdometer
 		
 		/* Calculates the mean of all points for each vector in fullMap_ and stores it in map_
 		 *
-		 * */	
+		 * */
+		/*
+		 * Computes the mean for all points that were matched and thus put together into the fullMap_.
+		 * @return true if map was computed and has as many elements as the fullMap_.
+		 * */
 		bool computeMeanMap()
 			{
 			map_.clear();
@@ -618,7 +757,7 @@ class VisualOdometer
 					maxSize = size;
 					maxIdx = i;
 					}
-				average += fullMap_[i].size();
+				average += size;
 				
 				cv::Point3d mapPoint;
 				for (unsigned int j = 0; j < fullMap_[i].size(); ++j)
@@ -632,41 +771,49 @@ class VisualOdometer
 			average = average / fullMap_.size();
 			std::cout << "Max Size of points per point 	[" << maxIdx << "]:	" << maxSize << std::endl;
 			std::cout << "Avg Size of points per point:		" << average << std::endl;
-			std::cout << "Points in the full map:		" << fullMap_.size() << std::endl;
-			std::cout << "Points in the meanizizized map:		" << map_.size() << std::endl;
+			std::cout << "Points in the full map:			" << fullMap_.size() << std::endl;
+			std::cout << "Points in the mean-points map:		" << map_.size() << std::endl;
 			if (map_.size() == fullMap_.size()) return true;
 			else return false;
 			}
 		
+		/*
+		 * Creates a pointcloud from the current map and publishes it.
+		 * If there is a sBA optimized map available it will use it otherwise it computes the mean map.
+		 * @see computeMeanMap()
+		 * */
 		void publishPC()
 			{
 			if (sbaMap_.empty() ? computeMeanMap() : true)
 				{
-//				std::vector<cv::Point3f>& points = nodes_.back().nodePoints_;
 				PointCloud pointCloud;
 				pointCloud.height = 1;
 				pointCloud.width = map_.size();
 				for (unsigned int i = 0; i < map_.size(); ++i) {pointCloud.points.push_back(PointT(map_[i].x, map_[i].y, map_[i].z));}
-//				for (unsigned int i = 0; i < points.size(); ++i) {pointCloud.points.push_back(PointT(points[i].x, points[i].y, points[i].z));}
+//std::cout << pointCloud.back() << std::endl;
 				pointCloud.header.frame_id = parentFrame_;
 				pointCloud.header.stamp = ros::Time::now().toNSec();
 				pcPub_.publish(pointCloud);
+				std::cout << "PointCloud published (" << pointCloud.points.size() << ")" << std::endl;
 				}
 			}
 		
-		/* Run bundle adjustment over collected data
-		 *
+		/*
+		 * Runs sparse bundle adjustment over the gathered data.
+		 * Processes all the data so that it can be run through bundle adjustment.
+		 * @return The projection error if cvsba was used.
 		 * */	
 		double runSBA()
 			{
 			if (computeMeanMap())
 				{
+				// Get current hand-eye-tf
 				tf::StampedTransform tfNodeBL;
 				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
 				
 				std::cout << "Map successfully processed. Continuing with processing of nodes." << std::endl;
-				std::cout << "Last rVec, tVec before sba:		" << nodes_.back().rVecAbs_ << std::endl << nodes_.back().tVecAbs_ << std::endl;
 				
+				// Convert all Points into double format
 				std::vector< std::vector<cv::Point2d> > imagePoints(nodes_.size());
 				std::vector< std::vector<int> > visibility(nodes_.size());
 				std::vector<cv::Mat> cameraMatrices(nodes_.size()), rVecs(nodes_.size()), tVecs(nodes_.size());
@@ -675,6 +822,7 @@ class VisualOdometer
 					{
 					std::vector<cv::Point2d> imgPointsFromOneNode(map_.size());
 					std::vector<int> visibilityFromOneNode(map_.size(), 0);
+					// Fill elements of vectors at the indexes where each point has been put in the map (saved in Node::mapIdxs_)
 					for (unsigned int j = 0; j < nodes_[i].mapIdxs_.size(); ++j)
 						{
 						cv::Point2f& projectedPoint = nodes_[i].stereoPoints_l_[j];
@@ -685,30 +833,51 @@ class VisualOdometer
 					imagePoints[i] = imgPointsFromOneNode;
 					visibility[i] = visibilityFromOneNode;
 					cameraMatrices[i] = nodes_[i].projMat_l_.colRange(0,3);
-					rVecs[i] = nodes_[i].rVecAbs_;
+					
+/* "Best" results: openCV BA -> +tVec, +rVec, cvsba -> -rVec, +tVec. Nothing happens with openCV BA when using -tVec.
+   openCV needs the R matrix as input, cvsba the rodrigues format (might work with R matrix, too)
+*/
+					cv::Rodrigues(nodes_[i].rVecAbs_, rVecs[i]);
+//					rVecs[i] = nodes_[i].rVecAbs_;
 					tVecs[i] = nodes_[i].tVecAbs_;
 					}
-				
+				std::cout << "Last rVec, tVec before sba:		" << std::endl << rVecs.back() << std::endl << tVecs.back() << std::endl;
 				double tickTime = (double)cv::getTickCount();
-				cvsba::Sba sba;
-				double projErr = sba.run(map_, imagePoints, visibility, cameraMatrices, rVecs, tVecs, distCoeffs);
+				
+// #######CVSBA######
+//				cvsba::Sba sba;
+//				cvsba::Sba::Params sbaParams(cvsba::Sba::MOTIONSTRUCTURE, 150, 1e-5, 5, 5, true);
+//				sba.setParams(sbaParams);
+//				double projErr = sba.run(map_, imagePoints, visibility, cameraMatrices, rVecs, tVecs, distCoeffs);
+//				std::cout << "Initial error=" << sba.getInitialReprjError() << ". " << "Final error=" << sba.getFinalReprjError() << std::endl;
+
+// ######openCV BA######				
+				cv::LevMarqSparse::bundleAdjust(map_, imagePoints, visibility, cameraMatrices, rVecs, tVecs, distCoeffs);
+// #####################
+
 				tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
 				std::cout << "Time used:		" << tickTime*1000 << "ms" << std::endl << std::endl;
-				std::cout << "Initial error=" << sba.getInitialReprjError() << ". " << "Final error=" << sba.getFinalReprjError() << std::endl;
 				std::cout << "Last rVec, tVec after sba:		" << rVecs.back() << std::endl << tVecs.back() << std::endl;
 				
-				tf::Transform tfCurrNodeFirstNode = tfFromRTVecs(rVecs.back(), tVecs.back());
-				tf::Transform tfBLOdom = tfInitialNodeBL*(tfCurrNodeFirstNode*tfNodeBL.inverse());
+// at least cvsba seems to change the data where the Matrix headers of R and T point to, so it doesn't change the R, T in the Nodes.
+				cv::Mat lastRVec;
+				cv::Rodrigues(rVecs.back(), lastRVec);
+				tf::Transform tfCurrNodeFirstNode = tfFromRTVecs(lastRVec, tVecs.back()); // Change lastRVec to rVecs.back() if using cvsba with rodrigues format
+				
+				// Get tf from the baselink of the robot to world frame and put it as the last transform in the vector
+				tf::Transform tfBLOdom = tfCurrNodeFirstNode*tfNodeBL.inverse();
 				transforms_.back() = tfBLOdom;
 				sbaMap_ = map_;
 				
-				return projErr;
+//cvsba only	return projErr;
+				return 0;
 				}
 			else return -1;
 			}
 		
-		/* draws the features/matches and publishes them
-		 *
+		/*
+		 * Draws matched features and publishes them.
+		 * Draws stereo matches left<->right of current node and matches between current and previous node.
 		 * */
 		void visualizeMatches()
 			{
@@ -732,7 +901,7 @@ class VisualOdometer
 					{
 					cv::Point2f& pointLeft = currNode.stereoPoints_l_[i];
 					cv::Point2f& pointRight = currNode.stereoPoints_r_[i];
-					cv::circle(imgCurr_r_, pointLeft, 1, cv::Scalar(0,153,255));
+					//cv::circle(imgCurr_r_, pointLeft, 1, cv::Scalar(0,153,255));
 					cv::circle(imgCurr_r_, pointRight, 1, cv::Scalar(0,255,255));
 					cv::line(imgCurr_r_, pointLeft, pointRight, cv::Scalar(255,153,0));
 					}
@@ -746,6 +915,7 @@ class VisualOdometer
 
 int main(int argc, char** argv)
 	{
+	// Those parameters are here temporarily to change feature/descriptor extraction parameters without recompiling
 	int nfeatures = 3000;
 	float scaleFactor = argc > 1 ? std::atof(argv[1]) : 1.2f;
 	int nlevels = argc > 2 ? std::atoi(argv[2]) : 12;
@@ -767,7 +937,9 @@ int main(int argc, char** argv)
 	ros::Rate loopRate(10);
 	ros::Time begin = ros::Time::now();
 	ros::Duration collDur(12.0);
-	while (ros::ok() && ros::Time::now()-begin < collDur)
+//	while (ros::ok() && ros::Time::now()-begin < collDur) // run a certain time
+//	while (ros::ok() && visualOdo.nodes_.size() < 3) // Run until a certain amount of nodes have been created
+	while (ros::ok())
 		{
 		// Take time of each loop
 		double tickTime = (double)cv::getTickCount();
@@ -793,7 +965,8 @@ int main(int argc, char** argv)
 		loopRate.sleep();
 		}
 	
-	//if (ros::ok()) visualOdo.runSBA();
+//	if (ros::ok()) visualOdo.runSBA();
+	// continue publishing data after BA has been run
 	while (ros::ok())
 		{
 		visualOdo.publishTF();

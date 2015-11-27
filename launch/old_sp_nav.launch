@@ -1,7 +1,7 @@
 <launch>
   <!-- Setup the camera -->
-  <arg name="camera" default="/vrmagic"/>
-  <arg name="bagfile" default="$(find sp_navigation)/data/2015-11-27-14-54-24.bag"/>
+  <arg name="camera" default="/apollon/vrmagic"/>
+  <arg name="bagfile" default="$(find sp_navigation)/data/stereo_raw_meters.bag"/>
   <param name="/use_sim_time" value="true"/>
 
   <!-- Setup robot: tf and robot model -->
@@ -17,7 +17,7 @@
   </group>
   
   <!-- Run the sp_navigation node, (args are there only temporarily to change feature detection parameters without recompiling -->
-  <node pkg="sp_navigation" type="sp_navigation" name="short_path_navigation" args="1.2 12 21 2 stereo:=/vrmagic" output="screen"/>
+  <node pkg="sp_navigation" type="sp_navigation" name="short_path_navigation" args="1.2 12 21 2 stereo:=/apollon/vrmagic" output="screen"/>
  
   <!-- Run Rviz for visualization 
   <node pkg="rviz" type="rviz" name="rviz"/>
