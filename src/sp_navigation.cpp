@@ -5,6 +5,7 @@
 #include <opencv2/core/core.hpp>
 #include <opencv2/video/tracking.hpp>
 #include <opencv2/contrib/contrib.hpp>
+#include <opencv2/nonfree/nonfree.hpp>
 #include <pcl_ros/point_cloud.h>
 #include <pcl/point_types.h>
 #include <image_transport/subscriber_filter.h>
@@ -19,6 +20,9 @@
 #include <tf/LinearMath/Quaternion.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TransformStamped.h>
+
+#include <sensor_msgs/PointCloud.h>
+#include <pcl_conversions/pcl_conversions.h>
 //#include <cvsba/cvsba.h>	// External library for sparse bundle adjustment
 
 
@@ -61,6 +65,10 @@ void rtVecsFromTF(const tf::StampedTransform tf, cv::Mat& rVec, cv::Mat& tVec)
  */
 struct Node
 	{
+	static cv::Ptr<cv::FeatureDetector> fDetector; /**< Feature detector interface.*/
+	static cv::Ptr<cv::DescriptorExtractor> dExtractor; /**< Descriptor extractor interface.*/
+	static cv::Ptr<cv::DescriptorMatcher> dMatcher; /**< Descriptor matcher interface.*/
+	
 	static cv::ORB oFDDE; /**< ORB feature detector and descriptor extractor.*/
 	static cv::BFMatcher bfMatcher; /**< Bruteforce matcher with cross-checking of matches.*/
 	
@@ -215,15 +223,20 @@ struct Node
 		// Detect features in left and right image
 		std::vector<cv::KeyPoint> keyPoints_l, keyPoints_r;
 		cv::Mat descriptors_l, descriptors_r;
-		oFDDE(img_l, cv::noArray(), keyPoints_l, descriptors_l);
-		oFDDE(img_r, cv::noArray(), keyPoints_r, descriptors_r);
+//		oFDDE(img_l, cv::noArray(), keyPoints_l, descriptors_l);
+//		oFDDE(img_r, cv::noArray(), keyPoints_r, descriptors_r);
+		fDetector->detect(img_l, keyPoints_l);
+		fDetector->detect(img_r, keyPoints_r);
+		dExtractor->compute(img_l, keyPoints_l, descriptors_l);
+		dExtractor->compute(img_r, keyPoints_r, descriptors_r);
 
 //		std::cout << "Found features left:		" << keyPoints_l.size() << std::endl;
 //		std::cout << "Found features right:		" << keyPoints_r.size() << std::endl;
 		
 		// Match features with a descriptor(!)-distance below a threshold
 		std::vector< std::vector<cv::DMatch> > matches;
-		bfMatcher.radiusMatch(descriptors_l, descriptors_r, matches, 25);
+//		bfMatcher.radiusMatch(descriptors_l, descriptors_r, matches, 25);
+		dMatcher->radiusMatch(descriptors_l, descriptors_r, matches, 35);
 		
 		// Only use matches that fulfill the epipolar constraint, thus lying on a horizontal line
 		std::vector<cv::Point2f> refinedPoints_l, refinedPoints_r;
@@ -304,7 +317,8 @@ struct Node
 		{
 		// Match features with a descriptor(!)-distance below a threshold
 		std::vector< std::vector<cv::DMatch> > radiusMatches;
-		bfMatcher.radiusMatch(desc_l_, previousNode.desc_l_, radiusMatches, 20);
+//		bfMatcher.radiusMatch(desc_l_, previousNode.desc_l_, radiusMatches, 20);
+		dMatcher->radiusMatch(desc_l_, previousNode.desc_l_, radiusMatches, 35);
 		
 		// Create Vectors containing the matched points
 		std::vector<cv::Point2f> matchedPointsCurr1, matchedPointsPrev1;
@@ -456,6 +470,9 @@ struct Node
 
 cv::ORB Node::oFDDE(3000);
 cv::BFMatcher Node::bfMatcher(cv::NORM_HAMMING, true); // Only cross-checked matches will be used
+cv::Ptr<cv::FeatureDetector> Node::fDetector = cv::FeatureDetector::create("SURF");
+cv::Ptr<cv::DescriptorExtractor> Node::dExtractor = cv::DescriptorExtractor::create("ORB");
+cv::Ptr<cv::DescriptorMatcher> Node::dMatcher = cv::DescriptorMatcher::create("BruteForce-Hamming");
 
 /**
  * Class for synchronized image subscribing
@@ -580,6 +597,8 @@ class VisualOdometer
 		ros::Publisher posePub_; /**< Pose publisher. */
 		ros::Publisher pcPub_; /**< PointCloud publisher. */
 		unsigned int matchFails_; /**< Number of failed matches. */
+		
+		ros::Publisher testPub;
 	
 	public:
 		cv::Mat imgPrev_l_; /**< Previous left image. */
@@ -609,6 +628,7 @@ class VisualOdometer
 			ros::NodeHandle nh;
 			posePub_ = nh.advertise<geometry_msgs::PoseStamped>("sp_navigation/Pose", 50);
 			pcPub_ = nh.advertise<PointCloud>("sp_navigation/PointCloud", 50);
+			testPub = nh.advertise<sensor_msgs::PointCloud>("sp_navigation/PointCloud2", 50);
 			}
 		
 		/*
@@ -784,16 +804,31 @@ class VisualOdometer
 		 * */
 		void publishPC()
 			{
-			if (sbaMap_.empty() ? computeMeanMap() : true)
+//			if (sbaMap_.empty() ? computeMeanMap() : true)
+			if (computeMeanMap())
 				{
 				PointCloud pointCloud;
 				pointCloud.height = 1;
 				pointCloud.width = map_.size();
 				for (unsigned int i = 0; i < map_.size(); ++i) {pointCloud.points.push_back(PointT(map_[i].x, map_[i].y, map_[i].z));}
-//std::cout << pointCloud.back() << std::endl;
+if (!pointCloud.points.empty()) std::cout << pointCloud.points[0] << std::endl;
 				pointCloud.header.frame_id = parentFrame_;
 				pointCloud.header.stamp = ros::Time::now().toNSec();
 				pcPub_.publish(pointCloud);
+				
+				sensor_msgs::PointCloud test;
+				for (unsigned int i = 0; i < map_.size(); ++i)
+					{
+					geometry_msgs::Point32 p;
+					p.x = map_[i].x;
+					p.y = map_[i].y;
+					p.z = map_[i].z;
+					test.points.push_back(p);
+					}
+				test.header.frame_id = parentFrame_;
+				test.header.stamp = ros::Time::now();
+				testPub.publish(test);
+				
 				std::cout << "PointCloud published (" << pointCloud.points.size() << ")" << std::endl;
 				}
 			}
@@ -896,14 +931,24 @@ class VisualOdometer
 					cv::line(imgPrev_l_, pointPrev, pointCurr, cv::Scalar(0,200,0));
 					}
 				
-				// Draw stereo matches
+				// Draw stereo matches after getting min and max disparity to set the color accordingly
+				double minDisp = 1000., maxDisp = 0., dispRange;
+				std::vector<double> disparities;
+				for (unsigned int i = 0; i < currNode.stereoPoints_l_.size(); ++i)
+					{
+					double disparity = currNode.stereoPoints_l_[i].x - currNode.stereoPoints_r_[i].x;
+					minDisp = MIN(disparity, minDisp);
+					maxDisp = MAX(disparity, maxDisp);
+					disparities.push_back(disparity);
+					}
+				dispRange = maxDisp - minDisp;
 				for (unsigned int i = 0; i < currNode.stereoPoints_l_.size(); ++i)
 					{
 					cv::Point2f& pointLeft = currNode.stereoPoints_l_[i];
 					cv::Point2f& pointRight = currNode.stereoPoints_r_[i];
-					//cv::circle(imgCurr_r_, pointLeft, 1, cv::Scalar(0,153,255));
+					cv::line(imgCurr_r_, pointLeft, pointRight, cv::Scalar(0,255*(disparities[i]-minDisp)/dispRange,255));
 					cv::circle(imgCurr_r_, pointRight, 1, cv::Scalar(0,255,255));
-					cv::line(imgCurr_r_, pointLeft, pointRight, cv::Scalar(255,153,0));
+					//cv::circle(imgCurr_r_, pointLeft, 1, cv::Scalar(0,153,255));
 					}
 				}
 			stereoSub_->publishCVImages(imgPrev_l_, imgCurr_r_);
@@ -915,6 +960,27 @@ class VisualOdometer
 
 int main(int argc, char** argv)
 	{
+	cv::initModule_nonfree();
+	sp_navigation::Node::dMatcher->set("crossCheck", true);
+	
+// ORB
+//	sp_navigation::Node::fDetector->set("nFeatures", 5000);
+	
+// SIFT
+//	sp_navigation::Node::fDetector->set("contrastThreshold", 0.01);
+//	sp_navigation::Node::fDetector->set("edgeThreshold", 20);
+
+//SURF
+	sp_navigation::Node::fDetector->set("hessianThreshold", 100);
+	sp_navigation::Node::fDetector->set("nOctaves", 4);
+	sp_navigation::Node::fDetector->set("upright", true);
+	
+// HARRIS
+//	sp_navigation::Node::fDetector->set("nfeatures", 5000);
+//	sp_navigation::Node::fDetector->set("qualityLevel", 0.01);
+//	sp_navigation::Node::fDetector->set("minDistance", 2);
+//	sp_navigation::Node::fDetector->set("k", 0.001);
+	
 	// Those parameters are here temporarily to change feature/descriptor extraction parameters without recompiling
 	int nfeatures = 3000;
 	float scaleFactor = argc > 1 ? std::atof(argv[1]) : 1.2f;
@@ -938,8 +1004,8 @@ int main(int argc, char** argv)
 	ros::Time begin = ros::Time::now();
 	ros::Duration collDur(12.0);
 //	while (ros::ok() && ros::Time::now()-begin < collDur) // run a certain time
-//	while (ros::ok() && visualOdo.nodes_.size() < 3) // Run until a certain amount of nodes have been created
-	while (ros::ok())
+	while (ros::ok() && visualOdo.nodes_.size() < 50) // Run until a certain amount of nodes have been created
+//	while (ros::ok())
 		{
 		// Take time of each loop
 		double tickTime = (double)cv::getTickCount();
