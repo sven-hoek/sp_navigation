@@ -18,14 +18,20 @@
     </node>
   </group>
   
-  <!-- Run the sp_navigation node, (args are there only temporarily to change feature detection parameters without recompiling -->
-  <node pkg="sp_navigation" type="sp_navigation" name="short_path_navigation" args="1.2 12 21 2 stereo:=/vrmagic" output="screen"/>
+  <!-- Run the sp_navigation node -->
+  <node pkg="sp_navigation" type="sp_navigation" name="short_path_navigation" args="stereo:=/vrmagic" output="screen"/>
  
   <!-- Run Rviz for visualization 
   <node pkg="rviz" type="rviz" name="rviz"/>
   -->
   <!-- Run imgView for visualization -->
   <include file="$(find sp_navigation)/launch/image_view.launch"/>
+  
+  <!-- Run hector_trajectory_server to display path -->
+  <node ns="sp_navigation" pkg="hector_trajectory_server" type="hector_trajectory_server" name="hector_trajectory_server">
+    <param name="target_frame_name" value="odom"/>
+    <param name="trajectory_publish_rate" value="2.0"/>
+  </node>
   
   <!-- Run external visual odometry to compare
   <node pkg="viso2_ros" type="stereo_odometer" name="stereo_odometer" output="screen">

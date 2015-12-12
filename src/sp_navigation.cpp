@@ -69,10 +69,8 @@ struct Node
 	static cv::Ptr<cv::DescriptorExtractor> dExtractor; /**< Descriptor extractor interface.*/
 	static cv::Ptr<cv::DescriptorMatcher> dMatcher; /**< Descriptor matcher interface.*/
 	
-	static cv::ORB oFDDE; /**< ORB feature detector and descriptor extractor.*/
-	static cv::BFMatcher bfMatcher; /**< Bruteforce matcher with cross-checking of matches.*/
-	
-	std::vector< std::vector<cv::Point3f> >* map_; /**< Pointer to map consisting of Points, each with 3D information of each viewpoint */
+	std::vector<cv::Point3f> worldPoints_; /**< Pointer to the map.*/
+	std::vector<cv::Point3d>* map_; /**< Pointer to map.*/
 	cv::Mat projMat_l_, projMat_r_; /**< Projection Matrix of the left and right camera. */
 	std::vector<cv::Point2f> stereoPoints_l_, stereoPoints_r_; /**< Stereo matched Points. */
 	cv::Mat desc_l_, desc_r_; /**< Descriptors of stereo keypoints. */
@@ -93,7 +91,7 @@ struct Node
 	 * @param[in] projMat_l Projection matrix for left camera.
 	 * @param[in] projmat_r projection matrix for right camera.
 	 * */
-	Node(std::vector< std::vector<cv::Point3f> >& map,const cv::Matx34d& projMat_l,const cv::Matx34d& projMat_r) :
+	Node(std::vector<cv::Point3d>& map,const cv::Matx34d& projMat_l,const cv::Matx34d& projMat_r) :
 		projMat_l_(projMat_l),
 		projMat_r_(projMat_r)
 		{
@@ -108,7 +106,7 @@ struct Node
 	 * @param[in] img_l Left camera image.
 	 * @param[in] img_r Right camera image.
 	 * */
-	Node(std::vector< std::vector<cv::Point3f> >& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r) :
+	Node(std::vector<cv::Point3d>& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r) :
 		projMat_l_(projMat_l),
 		projMat_r_(projMat_r)
 		{
@@ -127,7 +125,7 @@ struct Node
 	 * @param[in] previousNode The previous node to relate this node to.
 	 * @param[in] mapFromBadPose Set this to 'true' if points still should be put into the map when there was no match to previous node.
 	 * */
-	Node(std::vector< std::vector<cv::Point3f> >& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r, const Node& previousNode, bool mapFromBadPose = false) :
+	Node(std::vector<cv::Point3d>& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r, const Node& previousNode, bool mapFromBadPose = false) :
 		projMat_l_(projMat_l),
 		projMat_r_(projMat_r)
 		{
@@ -146,7 +144,7 @@ struct Node
 	 * @param[in] img_r Right camera image.
 	 * @return The created node.
 	 * */
-	static Node firstNode(std::vector< std::vector<cv::Point3f> >& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r)
+	static Node firstNode(std::vector<cv::Point3d>& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r)
 		{
 		// Create Node that already has all coordinate data filled
 		Node n(map, projMat_l, projMat_r, img_l, img_r);
@@ -158,8 +156,8 @@ struct Node
 		// Put all found 3D points into the map and save where they have been put (no need to transform them)
 		for (unsigned int i = 0; i < n.nodePoints_.size(); ++i)
 			{
-			n.map_->push_back(std::vector<cv::Point3f>());
-			n.map_->at(i).push_back(n.nodePoints_[i]);
+			n.worldPoints_.push_back(n.nodePoints_[i]);
+			n.map_->push_back(n.nodePoints_[i]);
 			n.mapIdxs_.push_back(i);
 			}
 		return n;
@@ -179,7 +177,7 @@ struct Node
 	 * @param[in] tVec Translation vector of the transformation. Should be of double type.
 	 * @return The created node.
 	 * */
-	static Node firstNode(std::vector< std::vector<cv::Point3f> >& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r, const cv::Mat& rVec, const cv::Mat& tVec)
+	static Node firstNode(std::vector<cv::Point3d>& map, const cv::Matx34d& projMat_l, const cv::Matx34d& projMat_r, const cv::Mat& img_l, const cv::Mat& img_r, const cv::Mat& rVec, const cv::Mat& tVec)
 		{
 		// Create Node that already has all coordinate data filled
 		Node n(map, projMat_l, projMat_r, img_l, img_r);
@@ -193,12 +191,10 @@ struct Node
 		cv::Rodrigues(n.rVecAbs_, R);
 		R.copyTo(RT.colRange(0, 3).rowRange(0, 3));
 		n.tVecAbs_.copyTo(RT.rowRange(0, 3).col(3));
-		std::vector<cv::Point3f> worldPoints;
-		cv::perspectiveTransform(n.nodePoints_, worldPoints, RT);
-		for (unsigned int i = 0; i < worldPoints.size(); ++i)
+		cv::perspectiveTransform(n.nodePoints_, n.worldPoints_, RT);
+		for (unsigned int i = 0; i < n.worldPoints_.size(); ++i)
 			{
-			n.map_->push_back(std::vector<cv::Point3f>());
-			n.map_->at(i).push_back(worldPoints[i]);
+			n.map_->push_back(n.worldPoints_[i]);
 			n.mapIdxs_.push_back(i);
 			}
 		return n;
@@ -223,19 +219,15 @@ struct Node
 		// Detect features in left and right image
 		std::vector<cv::KeyPoint> keyPoints_l, keyPoints_r;
 		cv::Mat descriptors_l, descriptors_r;
-//		oFDDE(img_l, cv::noArray(), keyPoints_l, descriptors_l);
-//		oFDDE(img_r, cv::noArray(), keyPoints_r, descriptors_r);
 		fDetector->detect(img_l, keyPoints_l);
 		fDetector->detect(img_r, keyPoints_r);
 		dExtractor->compute(img_l, keyPoints_l, descriptors_l);
 		dExtractor->compute(img_r, keyPoints_r, descriptors_r);
-
 //		std::cout << "Found features left:		" << keyPoints_l.size() << std::endl;
 //		std::cout << "Found features right:		" << keyPoints_r.size() << std::endl;
 		
 		// Match features with a descriptor(!)-distance below a threshold
 		std::vector< std::vector<cv::DMatch> > matches;
-//		bfMatcher.radiusMatch(descriptors_l, descriptors_r, matches, 25);
 		dMatcher->radiusMatch(descriptors_l, descriptors_r, matches, 35);
 		
 		// Only use matches that fulfill the epipolar constraint, thus lying on a horizontal line
@@ -257,8 +249,7 @@ struct Node
 					}
 				}
 			}
-
-//		std::cout << "Matches found (on epiline):	" << refinedPoints_l.size() << std::endl;
+//		std::cout << "Matches found (on epilines):	" << refinedPoints_l.size() << std::endl;
 		
 		
 		// Remove outliers by RANSAC
@@ -286,7 +277,7 @@ struct Node
 			cv::triangulatePoints(projMat_l_, projMat_r_, ransacProofPoints_l, ransacProofPoints_r, triangulatedPointMat);
 			cv::convertPointsFromHomogeneous(triangulatedPointMat.t(), triangulatedPoints);
 
-//			// Filter points that were put behind the camera
+			// Filter points that are too far away
 			for (unsigned int i = 0; i < triangulatedPoints.size(); ++i)
 				{
 				if (triangulatedPoints[i].z < 15)
@@ -317,10 +308,9 @@ struct Node
 		{
 		// Match features with a descriptor(!)-distance below a threshold
 		std::vector< std::vector<cv::DMatch> > radiusMatches;
-//		bfMatcher.radiusMatch(desc_l_, previousNode.desc_l_, radiusMatches, 20);
 		dMatcher->radiusMatch(desc_l_, previousNode.desc_l_, radiusMatches, 35);
 		
-		// Create Vectors containing the matched points
+		// Create vectors containing the matched points
 		std::vector<cv::Point2f> matchedPointsCurr1, matchedPointsPrev1;
 		std::vector<cv::Point3f> matchedNodePointsPrev1;
 		std::vector<cv::DMatch> matches1;
@@ -421,20 +411,36 @@ struct Node
 		
 		// Check if map pointer is valid and create reference for easier access
 		if (map_ == NULL) throw std::runtime_error("Error in Node::putIntoWorld: Pointer to map_ is a NULL pointer!");
-		std::vector< std::vector<cv::Point3f> >& mapRef = *map_;
 		
 		// Transform 3D points of this node into the world frame and add them to the map
 		cv::Mat R, RT = cv::Mat::eye(4, 4, CV_64F);
 		cv::Rodrigues(rVecAbs_, R);
 		R.copyTo(RT.colRange(0, 3).rowRange(0, 3));
 		tVecAbs_.copyTo(RT.rowRange(0, 3).col(3));
-		std::vector<cv::Point3f> worldPoints;
-		cv::perspectiveTransform(nodePoints_, worldPoints, RT);
-		
+		cv::perspectiveTransform(nodePoints_, worldPoints_, RT);
 //		std::cout << "RT:	" << std::endl << RT << std::endl;
+
 //		std::cout << std::endl << "Map size before adding new elements:	" << (*map_).size() << std::endl;
-		
-		for (unsigned int i = 0; i < worldPoints.size(); ++i)
+		mapIdxs_ = std::vector<unsigned int>(stereoPoints_l_.size(), -1);
+		for (unsigned int i = 0; i < matchesToPrev_.size(); ++i)
+			{
+			// Check if distance between 3D points is below a threshold
+			if (cv::norm(worldPoints_[matchesToPrev_[i].queryIdx] - previousNode.worldPoints_[matchesToPrev_[i].trainIdx]) < 0.3)
+				{
+				// Check if point of previous node is a point that was put into the map
+				if (previousNode.mapIdxs_[matchesToPrev_[i].trainIdx] == -1)
+					{
+					mapIdxs_[matchesToPrev_[i].queryIdx] = map_->size(); // Use size before adding so we don't have to substract 1
+					map_->push_back(worldPoints_[matchesToPrev_[i].queryIdx]);
+					}
+				else
+					{
+					mapIdxs_[matchesToPrev_[i].queryIdx] = previousNode.mapIdxs_[matchesToPrev_[i].trainIdx];
+					}
+				}
+			}
+
+/*		for (unsigned int i = 0; i < worldPoints_.size(); ++i)
 			{
 //			std::cout << "i =	" << i << std::endl;
 			// Check if point was already found by the last node
@@ -458,18 +464,17 @@ struct Node
 				mapIdx = mapRef.size() - 1;
 //				std::cout << "This feature was not found in previous node, mapIdx =	" << mapIdx << std::endl;
 				}
-			mapRef[mapIdx].push_back(worldPoints[i]);
+			mapRef[mapIdx].push_back(worldPoints_[i]);
 //			std::cout << "worldPoint[i=" << i << "] put at mapIdx " << mapIdx << std::endl;
 			mapIdxs_.push_back(mapIdx);
 			}
-		std::cout << std::endl << "New map size:		" << mapRef.size() << std::endl;
+*/
+		std::cout << std::endl << "New map size:		" << map_->size() << std::endl;
 		return true;
 		}
 	
 	};
 
-cv::ORB Node::oFDDE(3000);
-cv::BFMatcher Node::bfMatcher(cv::NORM_HAMMING, true); // Only cross-checked matches will be used
 cv::Ptr<cv::FeatureDetector> Node::fDetector = cv::FeatureDetector::create("SURF");
 cv::Ptr<cv::DescriptorExtractor> Node::dExtractor = cv::DescriptorExtractor::create("ORB");
 cv::Ptr<cv::DescriptorMatcher> Node::dMatcher = cv::DescriptorMatcher::create("BruteForce-Hamming");
@@ -607,9 +612,8 @@ class VisualOdometer
 		cv::Mat imgCurr_r_; /**< Current right image. */
 		std::vector<Node> nodes_; /**< Contains all created nodes. */
 		std::vector<tf::Transform> transforms_; /**< Contains all calculated Transforms (corresponding to nodes from nodes_). */
-		std::vector< std::vector<cv::Point3f> > fullMap_; /**< Map containing all 3D Points (in world frame) */
-		std::vector<cv::Point3d> map_; /**< Map with mean Points. */
-		std::vector<cv::Point3d> sbaMap_; /**< Map after sBA. */
+		std::vector<cv::Point3d> map_; /**< Map containing the 3D Points (in world frame) */
+//		std::vector<cv::Point3d> sbaMap_; /**< Map after sBA. */
 		
 		/*
 		 * Constructor.
@@ -627,8 +631,8 @@ class VisualOdometer
 			stereoSub_ = &stereoSub;
 			ros::NodeHandle nh;
 			posePub_ = nh.advertise<geometry_msgs::PoseStamped>("sp_navigation/Pose", 50);
-			pcPub_ = nh.advertise<PointCloud>("sp_navigation/PointCloud", 50);
-			testPub = nh.advertise<sensor_msgs::PointCloud>("sp_navigation/PointCloud2", 50);
+			pcPub_ = nh.advertise<PointCloud>("pointcloud", 50);
+			testPub = nh.advertise<PointCloud>("pointcloud2", 50);
 			}
 		
 		/*
@@ -664,10 +668,6 @@ class VisualOdometer
 			return false;
 			}
 		
-		/* Creates a node from the 'current' pair of pictures if there was a new one. If it successfully computes it's pose, it will get added to
-		 * the vector of nodes. This method returns 'false' only if the pose of the new node could not be computed.
-		 *
-		 * */
 		/*
 		 * Creates a new node if a new pair of images could be grabbed from the StereoSubscriber.
 		 * Checks if there are new images available in the StereoSubscriber and if so creates a new node.
@@ -686,14 +686,14 @@ class VisualOdometer
 				rtVecsFromTF(tfInitialNodeBL, rVec, tVec);
 				
 				std::cout << "nodes_.empty() && getImagePair() -> trying to create first node!" << std::endl;
-				nodes_.push_back(Node::firstNode(fullMap_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_, rVec, tVec));
-				std::cout << std::endl << "Map filled by first node with " << fullMap_.size() << " elements." << std::endl;
+				nodes_.push_back(Node::firstNode(map_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_, rVec, tVec));
+				std::cout << std::endl << "Map filled by first node with " << map_.size() << " elements." << std::endl;
 				return true;
 				}
 			else if (getImagePair())
 				{
 //				std::cout << "nodes_.empty() == false -> trying to create new node!" << std::endl;
-				Node n(fullMap_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_);
+				Node n(map_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_);
 				if (n.putIntoWorld(nodes_.back(), useBadPose))
 					{
 					std::cout << "Node successfully put in relation to previous node and world, it will be added to the others!" << std::endl;
@@ -712,9 +712,6 @@ class VisualOdometer
 			else return true;
 			}
 		
-		/* Calculates and publishes the TF information of the last node.
-		 *
-		 * */
 		/*
 		 * Publishes tf data and pose.
 		 * Computes the baselink pose from the current camera pose if not yet computed and publishes it.
@@ -757,46 +754,6 @@ class VisualOdometer
 			else std::cout << "No tf data." << std::endl;
 			}
 		
-		/* Calculates the mean of all points for each vector in fullMap_ and stores it in map_
-		 *
-		 * */
-		/*
-		 * Computes the mean for all points that were matched and thus put together into the fullMap_.
-		 * @return true if map was computed and has as many elements as the fullMap_.
-		 * */
-		bool computeMeanMap()
-			{
-			map_.clear();
-			unsigned int maxSize = 0, maxIdx = 0;
-			double average = 0;
-			for (unsigned int i = 0; i < fullMap_.size(); ++i)
-				{
-				int size = fullMap_[i].size();
-				if (size > maxSize)
-					{
-					maxSize = size;
-					maxIdx = i;
-					}
-				average += size;
-				
-				cv::Point3d mapPoint;
-				for (unsigned int j = 0; j < fullMap_[i].size(); ++j)
-					{
-					mapPoint += cv::Point3d(fullMap_[i][j].x, fullMap_[i][j].y, fullMap_[i][j].z);
-					}
-				mapPoint *= 1/(double)fullMap_[i].size();
-				map_.push_back(mapPoint);
-//				std::cout << mapPoint << std::endl;
-				}
-			average = average / fullMap_.size();
-			std::cout << "Max Size of points per point 	[" << maxIdx << "]:	" << maxSize << std::endl;
-			std::cout << "Avg Size of points per point:		" << average << std::endl;
-			std::cout << "Points in the full map:			" << fullMap_.size() << std::endl;
-			std::cout << "Points in the mean-points map:		" << map_.size() << std::endl;
-			if (map_.size() == fullMap_.size()) return true;
-			else return false;
-			}
-		
 		/*
 		 * Creates a pointcloud from the current map and publishes it.
 		 * If there is a sBA optimized map available it will use it otherwise it computes the mean map.
@@ -804,32 +761,15 @@ class VisualOdometer
 		 * */
 		void publishPC()
 			{
-//			if (sbaMap_.empty() ? computeMeanMap() : true)
-			if (computeMeanMap())
+			if (!map_.empty())
 				{
 				PointCloud pointCloud;
 				pointCloud.height = 1;
 				pointCloud.width = map_.size();
 				for (unsigned int i = 0; i < map_.size(); ++i) {pointCloud.points.push_back(PointT(map_[i].x, map_[i].y, map_[i].z));}
-if (!pointCloud.points.empty()) std::cout << pointCloud.points[0] << std::endl;
 				pointCloud.header.frame_id = parentFrame_;
-				pointCloud.header.stamp = ros::Time::now().toNSec();
+				pointCloud.header.stamp = ros::Time::now().toSec();
 				pcPub_.publish(pointCloud);
-				
-				sensor_msgs::PointCloud test;
-				for (unsigned int i = 0; i < map_.size(); ++i)
-					{
-					geometry_msgs::Point32 p;
-					p.x = map_[i].x;
-					p.y = map_[i].y;
-					p.z = map_[i].z;
-					test.points.push_back(p);
-					}
-				test.header.frame_id = parentFrame_;
-				test.header.stamp = ros::Time::now();
-				testPub.publish(test);
-				
-				std::cout << "PointCloud published (" << pointCloud.points.size() << ")" << std::endl;
 				}
 			}
 		
@@ -840,45 +780,38 @@ if (!pointCloud.points.empty()) std::cout << pointCloud.points[0] << std::endl;
 		 * */	
 		double runSBA()
 			{
-			if (computeMeanMap())
+			if (!map_.empty())
 				{
-				// Get current hand-eye-tf
-				tf::StampedTransform tfNodeBL;
-				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
-				
-				std::cout << "Map successfully processed. Continuing with processing of nodes." << std::endl;
-				
 				// Convert all Points into double format
-				std::vector< std::vector<cv::Point2d> > imagePoints(nodes_.size());
-				std::vector< std::vector<int> > visibility(nodes_.size());
-				std::vector<cv::Mat> cameraMatrices(nodes_.size()), rVecs(nodes_.size()), tVecs(nodes_.size());
+				std::vector<std::vector<cv::Point2d> > imagePoints;
+				std::vector<std::vector<int> > visibility;
+				std::vector<cv::Mat> camMatrices(nodes_.size());
+				std::vector<cv::Mat> tVecs(nodes_.size()), rMats(nodes_.size());
 				std::vector<cv::Mat> distCoeffs(nodes_.size(), cv::Mat::zeros(5, 1, CV_64F));
+			
 				for (unsigned int i = 0; i < nodes_.size(); ++i)
 					{
-					std::vector<cv::Point2d> imgPointsFromOneNode(map_.size());
-					std::vector<int> visibilityFromOneNode(map_.size(), 0);
-					// Fill elements of vectors at the indexes where each point has been put in the map (saved in Node::mapIdxs_)
+					camMatrices[i] = nodes_[i].projMat_l_.colRange(0,3);
+					Rodrigues(nodes_[i].rVecAbs_, rMats[i]);
+					tVecs[i] = nodes_[i].tVecAbs_;
+
+					std::vector<cv::Point2d> imagePoint(map_.size());
+					std::vector<int> vis(map_.size(), 0);
 					for (unsigned int j = 0; j < nodes_[i].mapIdxs_.size(); ++j)
 						{
-						cv::Point2f& projectedPoint = nodes_[i].stereoPoints_l_[j];
-						imgPointsFromOneNode[nodes_[i].mapIdxs_[j]] = cv::Point2d(projectedPoint.x, projectedPoint.y);
-						visibilityFromOneNode[nodes_[i].mapIdxs_[j]] = 1;
+						if (nodes_[i].mapIdxs_[j] != -1)
+							{
+							imagePoint[nodes_[i].mapIdxs_[j]] = cv::Point2d(nodes_[i].stereoPoints_l_[j].x, nodes_[i].stereoPoints_l_[j].y);
+							vis[nodes_[i].mapIdxs_[j]] = 1;
+							}
 						}
-					
-					imagePoints[i] = imgPointsFromOneNode;
-					visibility[i] = visibilityFromOneNode;
-					cameraMatrices[i] = nodes_[i].projMat_l_.colRange(0,3);
-					
-/* "Best" results: openCV BA -> +tVec, +rVec, cvsba -> -rVec, +tVec. Nothing happens with openCV BA when using -tVec.
-   openCV needs the R matrix as input, cvsba the rodrigues format (might work with R matrix, too)
-*/
-					cv::Rodrigues(nodes_[i].rVecAbs_, rVecs[i]);
-//					rVecs[i] = nodes_[i].rVecAbs_;
-					tVecs[i] = nodes_[i].tVecAbs_;
+					imagePoints.push_back(imagePoint);
+					visibility.push_back(vis);
 					}
-				std::cout << "Last rVec, tVec before sba:		" << std::endl << rVecs.back() << std::endl << tVecs.back() << std::endl;
+				std::cout << "Last R, t before sba:		" << std::endl << rMats.back() << std::endl << tVecs.back() << std::endl;
+			
 				double tickTime = (double)cv::getTickCount();
-				
+			
 // #######CVSBA######
 //				cvsba::Sba sba;
 //				cvsba::Sba::Params sbaParams(cvsba::Sba::MOTIONSTRUCTURE, 150, 1e-5, 5, 5, true);
@@ -886,28 +819,30 @@ if (!pointCloud.points.empty()) std::cout << pointCloud.points[0] << std::endl;
 //				double projErr = sba.run(map_, imagePoints, visibility, cameraMatrices, rVecs, tVecs, distCoeffs);
 //				std::cout << "Initial error=" << sba.getInitialReprjError() << ". " << "Final error=" << sba.getFinalReprjError() << std::endl;
 
-// ######openCV BA######				
-				cv::LevMarqSparse::bundleAdjust(map_, imagePoints, visibility, cameraMatrices, rVecs, tVecs, distCoeffs);
+// ######openCV BA######
+				cv::TermCriteria criteria(CV_TERMCRIT_ITER+CV_TERMCRIT_EPS, 150, 1e-10);
+				cv::LevMarqSparse::bundleAdjust(map_, imagePoints, visibility, camMatrices, rMats, tVecs, distCoeffs, criteria);
 // #####################
-
+			
 				tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
-				std::cout << "Time used:		" << tickTime*1000 << "ms" << std::endl << std::endl;
-				std::cout << "Last rVec, tVec after sba:		" << rVecs.back() << std::endl << tVecs.back() << std::endl;
-				
-// at least cvsba seems to change the data where the Matrix headers of R and T point to, so it doesn't change the R, T in the Nodes.
+				std::cout << "\nTime used:		" << tickTime*1000 << "ms" << std::endl << std::endl;
+				std::cout << "Last rVec, tVec after sba:\n" << rMats.back() << std::endl << tVecs.back() << std::endl;
+				std::cout << "tVec of last node:		" << nodes_.back().tVecAbs_ << std::endl;
+			
+				// At least cvsba seems to change the data where the Matrix headers of R and T point to, so it doesn't change the R, T in the Nodes.
 				cv::Mat lastRVec;
-				cv::Rodrigues(rVecs.back(), lastRVec);
+				cv::Rodrigues(rMats.back(), lastRVec);
 				tf::Transform tfCurrNodeFirstNode = tfFromRTVecs(lastRVec, tVecs.back()); // Change lastRVec to rVecs.back() if using cvsba with rodrigues format
-				
-				// Get tf from the baselink of the robot to world frame and put it as the last transform in the vector
+				// Get current hand-eye-tf
+				tf::StampedTransform tfNodeBL;
+				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
+				// Compute tf from the baselink of the robot to world frame and put it as the last transform in the vector
 				tf::Transform tfBLOdom = tfCurrNodeFirstNode*tfNodeBL.inverse();
 				transforms_.back() = tfBLOdom;
-				sbaMap_ = map_;
-				
-//cvsba only	return projErr;
-				return 0;
 				}
-			else return -1;
+			
+//cvsba only			return projErr;
+				return 0;
 			}
 		
 		/*
@@ -961,39 +896,14 @@ if (!pointCloud.points.empty()) std::cout << pointCloud.points[0] << std::endl;
 int main(int argc, char** argv)
 	{
 	cv::initModule_nonfree();
-	sp_navigation::Node::dMatcher->set("crossCheck", true);
-	
-// ORB
-//	sp_navigation::Node::fDetector->set("nFeatures", 5000);
-	
-// SIFT
-//	sp_navigation::Node::fDetector->set("contrastThreshold", 0.01);
-//	sp_navigation::Node::fDetector->set("edgeThreshold", 20);
 
-//SURF
+	//Set SURF feature detector parameters
 	sp_navigation::Node::fDetector->set("hessianThreshold", 100);
 	sp_navigation::Node::fDetector->set("nOctaves", 4);
 	sp_navigation::Node::fDetector->set("upright", true);
-	
-// HARRIS
-//	sp_navigation::Node::fDetector->set("nfeatures", 5000);
-//	sp_navigation::Node::fDetector->set("qualityLevel", 0.01);
-//	sp_navigation::Node::fDetector->set("minDistance", 2);
-//	sp_navigation::Node::fDetector->set("k", 0.001);
-	
-	// Those parameters are here temporarily to change feature/descriptor extraction parameters without recompiling
-	int nfeatures = 3000;
-	float scaleFactor = argc > 1 ? std::atof(argv[1]) : 1.2f;
-	int nlevels = argc > 2 ? std::atoi(argv[2]) : 12;
-	int edgeThreshold = argc > 3 ? std::atoi(argv[3]) : 21;
-	int firstLevel = 0;
-	int WTA_K = argc > 4 ? std::atoi(argv[4]) : 2;
-	int norm = WTA_K == 2 ? cv::NORM_HAMMING : cv::NORM_HAMMING2;
-	int scoreType = cv::ORB::HARRIS_SCORE;
-	int patchSize = edgeThreshold;
-	
-	sp_navigation::Node::oFDDE = cv::ORB(nfeatures, scaleFactor, nlevels, edgeThreshold, firstLevel, WTA_K, scoreType, patchSize);
-	sp_navigation::Node::bfMatcher = cv::BFMatcher(norm, true); // Only cross-checked matches will be used
+		
+	// Set cross checking of features to true
+	sp_navigation::Node::dMatcher->set("crossCheck", true);
 	
 	ros::init(argc, argv, "sp_navigation");
 	ros::NodeHandle nh;
@@ -1004,7 +914,7 @@ int main(int argc, char** argv)
 	ros::Time begin = ros::Time::now();
 	ros::Duration collDur(12.0);
 //	while (ros::ok() && ros::Time::now()-begin < collDur) // run a certain time
-	while (ros::ok() && visualOdo.nodes_.size() < 50) // Run until a certain amount of nodes have been created
+	while (ros::ok() && visualOdo.nodes_.size() < 30) // Run until a certain amount of nodes have been created
 //	while (ros::ok())
 		{
 		// Take time of each loop
@@ -1026,12 +936,11 @@ int main(int argc, char** argv)
 			{
 			std::cout << "Something unknown went wrong." << std::endl;
 			}
-			
 		std::cout << "Time used:		" << tickTime*1000 << "ms" << std::endl << std::endl;
 		loopRate.sleep();
 		}
 	
-//	if (ros::ok()) visualOdo.runSBA();
+	if (ros::ok()) visualOdo.runSBA();
 	// continue publishing data after BA has been run
 	while (ros::ok())
 		{
