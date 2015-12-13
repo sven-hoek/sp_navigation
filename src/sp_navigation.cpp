@@ -21,7 +21,6 @@
 #include <tf/LinearMath/Quaternion.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TransformStamped.h>
-
 #include <sensor_msgs/PointCloud.h>
 #include <pcl_conversions/pcl_conversions.h>
 //#include <cvsba/cvsba.h>	// External library for sparse bundle adjustment
@@ -561,8 +560,8 @@ class VisualOdometer
 	{
 	private:
 		StereoSubscriber* stereoSub_ = NULL; /**< Pointer to stereoSubscriber to get new images from. */
-		std::string parentFrame_; /**< Name of the world frame. */
-		std::string childFrame_; /**< Name of the baselink frame. */
+		std::string worldFrame_; /**< Name of the world frame. */
+		std::string robotFrame_; /**< Name of the baselink frame. */
 		std::string cameraFrame_; /**< Name of the camera frame. */
 		unsigned int lastImgIdx_; /**< Index oof last image received. */
 		tf::TransformListener tfListener_; /**< TransformListener to receive tf data. */
@@ -583,13 +582,13 @@ class VisualOdometer
 		/*
 		 * Constructor.
 		 * @param[in] stereoSub The stereoSubscriber to get the images from.
-		 * @param[in] parentFrame Name of the world frame.
-		 * @param[in] childFrame Name of the baselink frame.
+		 * @param[in] worldFrame Name of the world frame.
+		 * @param[in] robotFrame Name of the baselink frame.
 		 * @param[in] cameraFrame Name of the camera frame.
 		 * */
-		VisualOdometer(StereoSubscriber& stereoSub, const std::string parentFrame, const std::string childFrame, const std::string cameraFrame) :
-			parentFrame_(parentFrame),
-			childFrame_(childFrame),
+		VisualOdometer(StereoSubscriber& stereoSub, const std::string worldFrame, const std::string robotFrame, const std::string cameraFrame) :
+			worldFrame_(worldFrame),
+			robotFrame_(robotFrame),
 			cameraFrame_(cameraFrame),
 			lastImgIdx_(0),
 			stereoSub_(&stereoSub)
@@ -645,7 +644,7 @@ class VisualOdometer
 				{
 				// Get Hand-Eye-transform of first node (node to baselink) to know where the 'first camera' was located in the world
 				tf::StampedTransform tfInitialNodeBL;
-				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfInitialNodeBL);
+				tfListener_.lookupTransform(robotFrame_, cameraFrame_, ros::Time(0), tfInitialNodeBL);
 				cv::Mat rVec, tVec;
 				rtVecsFromTF(tfInitialNodeBL, rVec, tVec);
 				
@@ -669,7 +668,7 @@ class VisualOdometer
 					tf::Transform tfCurrNodeOdom = tfFromRTVecs(nodes_.back().rVecAbs_, nodes_.back().tVecAbs_);
 					// Look up current hand-eye-transformation
 					tf::StampedTransform tfNodeBL;
-					tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
+					tfListener_.lookupTransform(robotFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
 					tf::Transform tfBLOdom = tfCurrNodeOdom*tfNodeBL.inverse();
 					transforms_.push_back(tfBLOdom);
 					
@@ -697,12 +696,12 @@ class VisualOdometer
 			if (!transforms_.empty())
 				{
 				tf::Transform& tfBLOdom = transforms_.back();
-				tfBr_.sendTransform(tf::StampedTransform(tfBLOdom, ros::Time::now(), parentFrame_, childFrame_));
+				tfBr_.sendTransform(tf::StampedTransform(tfBLOdom, ros::Time::now(), worldFrame_, robotFrame_));
 		
 				// Also publish pose as message
 				geometry_msgs::PoseStamped poseMSG;
 				poseMSG.header.stamp = ros::Time::now();
-				poseMSG.header.frame_id = parentFrame_;
+				poseMSG.header.frame_id = worldFrame_;
 				poseMSG.pose.position.x = tfBLOdom.getOrigin().getX();
 				poseMSG.pose.position.y = tfBLOdom.getOrigin().getY();
 				poseMSG.pose.position.z = tfBLOdom.getOrigin().getZ();
@@ -729,7 +728,7 @@ class VisualOdometer
 				pointCloud.height = 1;
 				pointCloud.width = map_.size();
 				for (unsigned int i = 0; i < map_.size(); ++i) {pointCloud.points.push_back(PointT(map_[i].x, map_[i].y, map_[i].z));}
-				pointCloud.header.frame_id = parentFrame_;
+				pointCloud.header.frame_id = worldFrame_;
 				pointCloud.header.stamp = ros::Time::now().toSec();
 				pcPub_.publish(pointCloud);
 				}
@@ -797,7 +796,7 @@ class VisualOdometer
 				tf::Transform tfCurrNodeFirstNode = tfFromRTVecs(lastRVec, tVecs.back()); // Change lastRVec to rVecs.back() if using cvsba with rodrigues format
 				// Get current hand-eye-tf
 				tf::StampedTransform tfNodeBL;
-				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
+				tfListener_.lookupTransform(robotFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
 				// Compute tf from the baselink of the robot to world frame and put it as the last transform in the vector
 				tf::Transform tfBLOdom = tfCurrNodeFirstNode*tfNodeBL.inverse();
 				transforms_.back() = tfBLOdom;
@@ -852,7 +851,7 @@ class VisualOdometer
 			}
 		
 		/*
-		 * Returns the latest translation vector from world frame to base_link.
+		 * Returns the latest translation vector.
 		 * @return The latest translation vector.
 		 * */
 		tf::Vector3 getOrigin()
@@ -868,7 +867,7 @@ class VisualOdometer
 			}
 		
 		/*
-		 * Returns the latest rotation Matrix from world frame to base_link.
+		 * Returns the latest rotation Matrix.
 		 * @return The latest rotation Matrix.
 		 * */
 		tf::Matrix3x3 getBasis()
@@ -884,7 +883,7 @@ class VisualOdometer
 			}
 		
 		/*
-		 * Returns the latest rotation from world frame to base_link.
+		 * Returns the latest rotation.
 		 * @return The latest rotation as a quaternion.
 		 * */
 		tf::Quaternion getRotation()
