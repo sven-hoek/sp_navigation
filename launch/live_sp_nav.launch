@@ -1,7 +1,6 @@
 <launch>
   <!-- Setup the camera -->
   <arg name="camera" default="/vrmagic"/>
-  <arg name="bagfile" default="$(find sp_navigation)/data/stereo_raw_meters.bag"/>
   <param name="/use_sim_time" value="false"/>
 
   <include file="$(find vrmagic_camera)/launch/camera.launch"/>
@@ -19,7 +18,10 @@
   </group>
   
   <!-- Run the sp_navigation node -->
-  <node pkg="sp_navigation" type="sp_navigation" name="short_path_navigation" args="stereo:=/vrmagic" output="screen"/>
+  <node pkg="sp_navigation" type="sp_navigation" name="short_path_navigation" args="" output="screen">
+  	<remap from="stereo" to="$(arg camera)"/>
+  	<remap from="camera" to="/VRMAGIC"/>
+  </node>
  
   <!-- Run Rviz for visualization 
   <node pkg="rviz" type="rviz" name="rviz"/>
@@ -29,17 +31,8 @@
   
   <!-- Run hector_trajectory_server to display path -->
   <node ns="sp_navigation" pkg="hector_trajectory_server" type="hector_trajectory_server" name="hector_trajectory_server">
-    <param name="target_frame_name" value="odom"/>
+    <param name="target_frame_name" value="world"/>
     <param name="trajectory_publish_rate" value="2.0"/>
   </node>
   
-  <!-- Run external visual odometry to compare
-  <node pkg="viso2_ros" type="stereo_odometer" name="stereo_odometer" output="screen">
-    <remap from="stereo" to="$(arg camera)"/>
-    <remap from="image" to="image_rect"/>
-    <param name="base_link_frame_id" value="base_link"/>
-    <param name="publish_tf" value="true"/>
-  </node>
-  -->
-
 </launch>

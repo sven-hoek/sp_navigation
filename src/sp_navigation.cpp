@@ -1,4 +1,5 @@
 #include <stdexcept>
+#include <memory>
 #include <ros/ros.h>
 #include <image_transport/image_transport.h>
 #include <cv_bridge/cv_bridge.h>
@@ -475,16 +476,13 @@ class StereoSubscriber
 		/*
 		 * Constructor.
 		 * @param[in] nh The nodehandle to use.
-		 * @param[in] nameToResolve Name of the stereo namespace to use.
+		 * @param[in] stereoNamespace Name of the stereo namespace to use.
 		 * */
-		StereoSubscriber(ros::NodeHandle& nh, const std::string nameToResolve) :
+		StereoSubscriber(ros::NodeHandle& nh, const std::string stereoNamespace) :
 			it_(nh),
 			sync_(3),
 			imgIdx(0)
 			{
-			std::string stereoNamespace;
-			stereoNamespace = nh.resolveName(nameToResolve);
-
 			// Subscribe to stereo cameras
 			imgSub_l_.subscribe(it_, ros::names::clean(stereoNamespace + "/left/image_rect"), 3);
 			imgSub_r_.subscribe(it_, ros::names::clean(stereoNamespace + "/right/image_rect"), 3);
@@ -589,13 +587,13 @@ class VisualOdometer
 		 * @param[in] childFrame Name of the baselink frame.
 		 * @param[in] cameraFrame Name of the camera frame.
 		 * */
-		VisualOdometer(StereoSubscriber& stereoSub, std::string parentFrame, std::string childFrame, std::string cameraFrame) :
+		VisualOdometer(StereoSubscriber& stereoSub, const std::string parentFrame, const std::string childFrame, const std::string cameraFrame) :
 			parentFrame_(parentFrame),
 			childFrame_(childFrame),
 			cameraFrame_(cameraFrame),
-			lastImgIdx_(0)
+			lastImgIdx_(0),
+			stereoSub_(&stereoSub)
 			{
-			stereoSub_ = &stereoSub;
 			ros::NodeHandle nh;
 			posePub_ = nh.advertise<geometry_msgs::PoseStamped>("sp_navigation/Pose", 50);
 			pcPub_ = nh.advertise<PointCloud>("pointcloud", 50);
@@ -918,8 +916,13 @@ int main(int argc, char** argv)
 	
 	ros::init(argc, argv, "sp_navigation");
 	ros::NodeHandle nh;
-	sp_navigation::StereoSubscriber stereoSub(nh, "stereo");
-	sp_navigation::VisualOdometer visualOdo(stereoSub, std::string("odom"), std::string("base_link"), std::string("VRMAGIC"));
+	std::string stereoNamespace = nh.resolveName("stereo");
+	std::string worldFrame = nh.resolveName("world");
+	std::string robotFrame = nh.resolveName("base_link");
+	std::string cameraFrame = nh.resolveName("camera");
+	
+	sp_navigation::StereoSubscriber stereoSub(nh, stereoNamespace);
+	sp_navigation::VisualOdometer visualOdo(stereoSub, worldFrame, robotFrame, cameraFrame);
 	
 	ros::Rate loopRate(10);
 	ros::Time begin = ros::Time::now();
