@@ -23,7 +23,7 @@
 #include <geometry_msgs/TransformStamped.h>
 #include <sensor_msgs/PointCloud.h>
 #include <pcl_conversions/pcl_conversions.h>
-//#include <cvsba/cvsba.h>	// External library for sparse bundle adjustment
+#include <cvsba/cvsba.h>	// External library for sparse bundle adjustment
 
 
 namespace sp_navigation
@@ -634,7 +634,7 @@ class VisualOdometer
 		/*
 		 * Creates a new node if a new pair of images could be grabbed from the StereoSubscriber.
 		 * Checks if there are new images available in the StereoSubscriber and if so creates a new node.
-		 * @param useBadPose If true, 3D points from bad poses will be used in the map.
+		 * @param[in] useBadPose If true, 3D points from bad poses will be used in the map.
 		 * @see Node::putIntoWorld()
 		 * @return 'true' if nothing happened (no new images) or node successfully created, 'false' if match to previous node failed.
 		 * */
@@ -718,7 +718,6 @@ class VisualOdometer
 		/*
 		 * Creates a pointcloud from the current map and publishes it.
 		 * If there is a sBA optimized map available it will use it otherwise it computes the mean map.
-		 * @see computeMeanMap()
 		 * */
 		void publishPC()
 			{
@@ -737,9 +736,11 @@ class VisualOdometer
 		/*
 		 * Runs sparse bundle adjustment over the gathered data.
 		 * Processes all the data so that it can be run through bundle adjustment.
-		 * @return The projection error if cvsba was used.
+		 * @param[in] maxIterations The maximum number of iterations to run.
+		 * @param[in] useCVSBA Set this to true if cvSBA should be used rather than the openCV sBA algorithm.
+		 * @return The projection error if cvsba was used, 0 otherwise.
 		 * */	
-		double runSBA()
+		void runSBA(int maxIterations = 70, bool useCVSBA = false)
 			{
 			if (!map_.empty())
 				{
@@ -749,7 +750,6 @@ class VisualOdometer
 				std::vector<cv::Mat> camMatrices(nodes_.size());
 				std::vector<cv::Mat> tVecs(nodes_.size()), rMats(nodes_.size());
 				std::vector<cv::Mat> distCoeffs(nodes_.size(), cv::Mat::zeros(5, 1, CV_64F));
-			
 				for (unsigned int i = 0; i < nodes_.size(); ++i)
 					{
 					camMatrices[i] = nodes_[i].projMat_l_.colRange(0,3);
@@ -772,19 +772,21 @@ class VisualOdometer
 				std::cout << "Last R, t before sba:		" << std::endl << rMats.back() << std::endl << tVecs.back() << std::endl;
 			
 				double tickTime = (double)cv::getTickCount();
-			
-// #######CVSBA######
-//				cvsba::Sba sba;
-//				cvsba::Sba::Params sbaParams(cvsba::Sba::MOTIONSTRUCTURE, 150, 1e-5, 5, 5, true);
-//				sba.setParams(sbaParams);
-//				double projErr = sba.run(map_, imagePoints, visibility, cameraMatrices, rVecs, tVecs, distCoeffs);
-//				std::cout << "Initial error=" << sba.getInitialReprjError() << ". " << "Final error=" << sba.getFinalReprjError() << std::endl;
-
-// ######openCV BA######
-				cv::TermCriteria criteria(CV_TERMCRIT_ITER+CV_TERMCRIT_EPS, 70, 1e-10);
-				cv::LevMarqSparse::bundleAdjust(map_, imagePoints, visibility, camMatrices, rMats, tVecs, distCoeffs, criteria);
-// #####################
-			
+				if (useCVSBA)
+					{
+					cvsba::Sba sba;
+					cvsba::Sba::Params sbaParams(cvsba::Sba::MOTIONSTRUCTURE, maxIterations, 1e-5, 5, 5, true);
+					sba.setParams(sbaParams);
+					double projErr = sba.run(map_, imagePoints, visibility, camMatrices, rMats, tVecs, distCoeffs);
+					std::cout << "Initial error=" << sba.getInitialReprjError() << "\n";
+					std::cout << "Final error=" << sba.getFinalReprjError() << "\n";
+					std::cout << "Projection error=" << projErr << std::endl;
+					}
+				else
+					{
+					cv::TermCriteria criteria(CV_TERMCRIT_ITER+CV_TERMCRIT_EPS, maxIterations, 1e-10);
+					cv::LevMarqSparse::bundleAdjust(map_, imagePoints, visibility, camMatrices, rMats, tVecs, distCoeffs, criteria);
+					}
 				tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
 				std::cout << "\nTime used:		" << tickTime*1000 << "ms" << std::endl << std::endl;
 				std::cout << "Last rVec, tVec after sba:\n" << rMats.back() << std::endl << tVecs.back() << std::endl;
@@ -801,9 +803,6 @@ class VisualOdometer
 				tf::Transform tfBLOdom = tfCurrNodeFirstNode*tfNodeBL.inverse();
 				transforms_.back() = tfBLOdom;
 				}
-			
-//cvsba only			return projErr;
-				return 0;
 			}
 		
 		/*
@@ -898,6 +897,77 @@ class VisualOdometer
 				}
 			}
 	};
+
+/**
+ * Class to navigate a robot using visual odomotry.
+ */
+class robotMove
+	{
+	private:
+//		VisualOdometer odometer_; /**< Visual odometer */
+		std::string moveTopic_; /**< Name of topic to pubish velocity. */
+		ros::Publisher velPub_; /**< Velocity publisher. */
+	
+	public:
+VisualOdometer odometer_; /**< Visual odometer */
+		/*
+		 * Constructor.
+		 * @param[in] stereoSub The stereoSubscriber to get the images from.
+		 * @param[in] worldFrame Name of the world frame.
+		 * @param[in] robotFrame Name of the baselink frame.
+		 * @param[in] cameraFrame Name of the camera frame.
+		 * @param[in] Name of the topic to publish velocity.
+		 * */
+		robotMove(StereoSubscriber& stereoSub, std::string worldFrame, std::string robotFrame, std::string cameraFrame, std::string moveTopic) :
+			odometer_(stereoSub, worldFrame, robotFrame, cameraFrame), 
+			moveTopic_(moveTopic)
+			{
+			ros::NodeHandle nh;
+			velPub_ = nh.advertise<geometry_msgs::Twist>("/cmd_vel", 1, true);
+			}
+		
+		/*
+		 * Updates the visual odometer.
+		 * @param[in] useBadPose Set this to true if last R, T should be used when none could be found this time.
+		 * @return The time that has been used (in seconds).
+		 * */
+		double update(bool useBadPose = false)
+			{
+			double tickTime = (double)cv::getTickCount();
+			odometer_.update(useBadPose);
+			tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
+			return tickTime;
+			}
+		
+		/*
+		 * Publishes the data from the odometer like pose, 3D map and pictures with matches drawn.
+		 * @param[in] publishTF If true, tf data will be published.
+		 * @param[in] publishPC If true, map will be published as pointcloud.
+		 * @param[in] visualizeMatches If true, matches will be drawn into images and published.
+		 * */
+		void publishOdomData(bool publishTF = true, bool publishPC = true, bool visualizeMatches = true)
+			{
+			if (publishTF) odometer_.publishTF();
+			if (publishPC) odometer_.publishPC();
+			if (visualizeMatches) odometer_.visualizeMatches();
+			}
+		
+		/*
+		 * Publishes a twist containing angular and linear velocity to move the robot.
+		 * @param[in] velX Velocity in x-direction.
+		 * @param[in] velY Velocity in y-direction.
+		 * @param[in] velOmega Angular velocity.
+		 * */
+		void publishVel(double velX, double velY, double velOmega)
+			{
+			geometry_msgs::Twist velMSG;
+			velMSG.linear.x = velX;
+			velMSG.linear.y = velY;
+			velMSG.angular.z = velOmega;
+
+			velPub_.publish(velMSG);
+			}
+	};
 } //End of namespace
 
 
@@ -921,25 +991,21 @@ int main(int argc, char** argv)
 	std::string cameraFrame = nh.resolveName("camera");
 	
 	sp_navigation::StereoSubscriber stereoSub(nh, stereoNamespace);
-	sp_navigation::VisualOdometer visualOdo(stereoSub, worldFrame, robotFrame, cameraFrame);
+	sp_navigation::robotMove robot(stereoSub, worldFrame, robotFrame, cameraFrame, "/cmd_vel");
 	
 	ros::Rate loopRate(10);
 	ros::Time begin = ros::Time::now();
 	ros::Duration collDur(9.0);
+	double time;
 //	while (ros::ok() && ros::Time::now()-begin < collDur) // run a certain time
-//	while (ros::ok() && visualOdo.nodes_.size() < 70) // Run until a certain amount of nodes have been created
+//	while (ros::ok() && robot.odometer_.nodes_.size() < 70) // Run until a certain amount of nodes have been created
 	while (ros::ok())
 		{
-		// Take time of each loop
-		double tickTime = (double)cv::getTickCount();
 		ros::spinOnce();
 		try
 			{
-			visualOdo.update(false);
-			tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
-			visualOdo.publishTF();
-			visualOdo.publishPC();
-			visualOdo.visualizeMatches();
+			time = robot.update();
+			robot.publishOdomData();
 			}
 		catch(std::exception& e)
 			{
@@ -949,17 +1015,15 @@ int main(int argc, char** argv)
 			{
 			std::cout << "Something unknown went wrong." << std::endl;
 			}
-		std::cout << "Time used:		" << tickTime*1000 << "ms" << std::endl << std::endl;
+		std::cout << "Time used:		" << time*1000 << "ms" << std::endl << std::endl;
 		loopRate.sleep();
 		}
 	
-	if (ros::ok()) visualOdo.runSBA();
+	if (ros::ok()) robot.odometer_.runSBA(75, false);
 	// continue publishing data after BA has been run
 	while (ros::ok())
 		{
-		visualOdo.publishTF();
-		visualOdo.publishPC();
-		visualOdo.visualizeMatches();
+		robot.publishOdomData();
 		loopRate.sleep();
 		}
 	}
