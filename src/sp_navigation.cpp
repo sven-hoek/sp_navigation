@@ -439,36 +439,6 @@ struct Node
 					}
 				}
 			}
-
-/*		for (unsigned int i = 0; i < worldPoints_.size(); ++i)
-			{
-//			std::cout << "i =	" << i << std::endl;
-			// Check if point was already found by the last node
-			bool foundMatch = false;
-			unsigned int mapIdx = 0;
-			for (unsigned int j = 0; j < matchesToPrev_.size(); ++j)
-				{
-//				std::cout << "j =	" << j << std::endl;
-				if (matchesToPrev_[j].queryIdx == i)
-					{
-//					std::cout << "This feature was already found in previous node";
-					mapIdx = previousNode.mapIdxs_[matchesToPrev_[j].trainIdx];
-//					std::cout << ", mapIdx =	" << mapIdx << std::endl;
-					foundMatch = true;
-					break;
-					}
-				}
-			if (!foundMatch)
-				{
-				mapRef.push_back(std::vector<cv::Point3f>());
-				mapIdx = mapRef.size() - 1;
-//				std::cout << "This feature was not found in previous node, mapIdx =	" << mapIdx << std::endl;
-				}
-			mapRef[mapIdx].push_back(worldPoints_[i]);
-//			std::cout << "worldPoint[i=" << i << "] put at mapIdx " << mapIdx << std::endl;
-			mapIdxs_.push_back(mapIdx);
-			}
-*/
 		std::cout << std::endl << "New map size:		" << map_->size() << std::endl;
 		return true;
 		}
@@ -602,8 +572,6 @@ class VisualOdometer
 		ros::Publisher posePub_; /**< Pose publisher. */
 		ros::Publisher pcPub_; /**< PointCloud publisher. */
 		unsigned int matchFails_; /**< Number of failed matches. */
-		
-		ros::Publisher testPub;
 	
 	public:
 		cv::Mat imgPrev_l_; /**< Previous left image. */
@@ -613,7 +581,6 @@ class VisualOdometer
 		std::vector<Node> nodes_; /**< Contains all created nodes. */
 		std::vector<tf::Transform> transforms_; /**< Contains all calculated Transforms (corresponding to nodes from nodes_). */
 		std::vector<cv::Point3d> map_; /**< Map containing the 3D Points (in world frame) */
-//		std::vector<cv::Point3d> sbaMap_; /**< Map after sBA. */
 		
 		/*
 		 * Constructor.
@@ -632,7 +599,6 @@ class VisualOdometer
 			ros::NodeHandle nh;
 			posePub_ = nh.advertise<geometry_msgs::PoseStamped>("sp_navigation/Pose", 50);
 			pcPub_ = nh.advertise<PointCloud>("pointcloud", 50);
-			testPub = nh.advertise<PointCloud>("pointcloud2", 50);
 			}
 		
 		/*
@@ -686,7 +652,10 @@ class VisualOdometer
 				rtVecsFromTF(tfInitialNodeBL, rVec, tVec);
 				
 				std::cout << "nodes_.empty() && getImagePair() -> trying to create first node!" << std::endl;
+				
 				nodes_.push_back(Node::firstNode(map_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_, rVec, tVec));
+				transforms_.push_back(tf::Transform::getIdentity());
+				
 				std::cout << std::endl << "Map filled by first node with " << map_.size() << " elements." << std::endl;
 				return true;
 				}
@@ -698,6 +667,14 @@ class VisualOdometer
 					{
 					std::cout << "Node successfully put in relation to previous node and world, it will be added to the others!" << std::endl;
 					nodes_.push_back(n);
+					
+					tf::Transform tfCurrNodeOdom = tfFromRTVecs(nodes_.back().rVecAbs_, nodes_.back().tVecAbs_);
+					// Look up current hand-eye-transformation
+					tf::StampedTransform tfNodeBL;
+					tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
+					tf::Transform tfBLOdom = tfCurrNodeOdom*tfNodeBL.inverse();
+					transforms_.push_back(tfBLOdom);
+					
 					std::cout << "Number of nodes:	" << nodes_.size() << std::endl;
 					std::cout << "Number of fails:	" << matchFails_ << std::endl;
 					return true;
@@ -718,21 +695,8 @@ class VisualOdometer
 		 * */
 		void publishTF()
 			{
-			// If there was no tf calculated for the current node, calculate it and add it to the vector
-			if (!nodes_.empty() && transforms_.size() < nodes_.size())
-				{
-				tf::Transform tfCurrNodeFirstNode = tfFromRTVecs(nodes_.back().rVecAbs_, nodes_.back().tVecAbs_);
-				
-				// Look up current hand-eye-transformation
-				tf::StampedTransform tfNodeBL;
-				tfListener_.lookupTransform(childFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
-				
-				tf::Transform tfBLOdom = tfCurrNodeFirstNode*tfNodeBL.inverse();
-				transforms_.push_back(tfBLOdom);
-				}
-			
-			// If tf data is up to date, publish it
-			if (!nodes_.empty() && transforms_.size() == nodes_.size())
+			// If tf data is available, publish it
+			if (!transforms_.empty())
 				{
 				tf::Transform& tfBLOdom = transforms_.back();
 				tfBr_.sendTransform(tf::StampedTransform(tfBLOdom, ros::Time::now(), parentFrame_, childFrame_));
@@ -820,7 +784,7 @@ class VisualOdometer
 //				std::cout << "Initial error=" << sba.getInitialReprjError() << ". " << "Final error=" << sba.getFinalReprjError() << std::endl;
 
 // ######openCV BA######
-				cv::TermCriteria criteria(CV_TERMCRIT_ITER+CV_TERMCRIT_EPS, 150, 1e-10);
+				cv::TermCriteria criteria(CV_TERMCRIT_ITER+CV_TERMCRIT_EPS, 70, 1e-10);
 				cv::LevMarqSparse::bundleAdjust(map_, imagePoints, visibility, camMatrices, rMats, tVecs, distCoeffs, criteria);
 // #####################
 			
@@ -888,8 +852,55 @@ class VisualOdometer
 				}
 			stereoSub_->publishCVImages(imgPrev_l_, imgCurr_r_);
 			}
+		
+		/*
+		 * Returns the latest translation vector from world frame to base_link.
+		 * @return The latest translation vector.
+		 * */
+		tf::Vector3 getOrigin()
+			{
+			if (!transforms_.empty())
+				{
+				return transforms_.back().getOrigin();
+				}
+			else
+				{
+				return tf::Vector3(0, 0, 0);
+				}
+			}
+		
+		/*
+		 * Returns the latest rotation Matrix from world frame to base_link.
+		 * @return The latest rotation Matrix.
+		 * */
+		tf::Matrix3x3 getBasis()
+			{
+			if (!transforms_.empty())
+				{
+				return transforms_.back().getBasis();
+				}
+			else
+				{
+				return tf::Matrix3x3::getIdentity();
+				}
+			}
+		
+		/*
+		 * Returns the latest rotation from world frame to base_link.
+		 * @return The latest rotation as a quaternion.
+		 * */
+		tf::Quaternion getRotation()
+			{
+			if (!transforms_.empty())
+				{
+				return transforms_.back().getRotation();
+				}
+			else
+				{
+				return tf::Quaternion::getIdentity();
+				}
+			}
 	};
-
 } //End of namespace
 
 
@@ -912,10 +923,10 @@ int main(int argc, char** argv)
 	
 	ros::Rate loopRate(10);
 	ros::Time begin = ros::Time::now();
-	ros::Duration collDur(12.0);
+	ros::Duration collDur(9.0);
 //	while (ros::ok() && ros::Time::now()-begin < collDur) // run a certain time
-	while (ros::ok() && visualOdo.nodes_.size() < 30) // Run until a certain amount of nodes have been created
-//	while (ros::ok())
+//	while (ros::ok() && visualOdo.nodes_.size() < 70) // Run until a certain amount of nodes have been created
+	while (ros::ok())
 		{
 		// Take time of each loop
 		double tickTime = (double)cv::getTickCount();
