@@ -662,7 +662,6 @@ class VisualOdometer
 				Node n(map_, stereoSub_->stCamModel_.left().projectionMatrix(), stereoSub_->stCamModel_.right().projectionMatrix(), imgCurr_l_, imgCurr_r_);
 				if (n.putIntoWorld(nodes_.back(), useBadPose))
 					{
-					std::cout << "Node successfully put in relation to previous node and world, it will be added to the others!" << std::endl;
 					nodes_.push_back(n);
 					
 					tf::Transform tfCurrNodeOdom = tfFromRTVecs(nodes_.back().rVecAbs_, nodes_.back().tVecAbs_);
@@ -672,6 +671,14 @@ class VisualOdometer
 					tf::Transform tfBLOdom = tfCurrNodeOdom*tfNodeBL.inverse();
 					transforms_.push_back(tfBLOdom);
 					
+					double yaw, pitch, roll;
+					tfBLOdom.getBasis().getEulerYPR(yaw, pitch, roll);
+					std::cout << "Robot position:" << std::endl;
+					std::cout << "tVec:		[" << tfBLOdom.getOrigin().getX() << ", " << tfBLOdom.getOrigin().getY() << ", " << tfBLOdom.getOrigin().getZ() << "]\n";
+					std::cout << "rVec:		" << tfBLOdom.getRotation().getAxis().getX() << ", " << tfBLOdom.getRotation().getAxis().getY() << ", " << tfBLOdom.getRotation().getAxis().getZ() << "]\n";
+					std::cout << "Yaw:		" << yaw << "\n";
+					std::cout << "Pitch:		" << pitch << "\n";
+					std::cout << "Roll:		" << roll << "\n";
 					std::cout << "Number of nodes:	" << nodes_.size() << std::endl;
 					std::cout << "Number of fails:	" << matchFails_ << std::endl;
 					return true;
@@ -738,9 +745,9 @@ class VisualOdometer
 		 * Processes all the data so that it can be run through bundle adjustment.
 		 * @param[in] maxIterations The maximum number of iterations to run.
 		 * @param[in] useCVSBA Set this to true if cvSBA should be used rather than the openCV sBA algorithm.
-		 * @return The projection error if cvsba was used, 0 otherwise.
+		 * @return True if pose after bundle adjustment gave a plausible result.
 		 * */	
-		void runSBA(int maxIterations = 70, bool useCVSBA = false)
+		bool runSBA(int maxIterations = 70, bool useCVSBA = false)
 			{
 			if (!map_.empty())
 				{
@@ -792,6 +799,7 @@ class VisualOdometer
 				std::cout << "Last rVec, tVec after sba:\n" << rMats.back() << std::endl << tVecs.back() << std::endl;
 				std::cout << "tVec of last node:		" << nodes_.back().tVecAbs_ << std::endl;
 			
+				
 				// At least cvsba seems to change the data where the Matrix headers of R and T point to, so it doesn't change the R, T in the Nodes.
 				cv::Mat lastRVec;
 				cv::Rodrigues(rMats.back(), lastRVec);
@@ -801,8 +809,24 @@ class VisualOdometer
 				tfListener_.lookupTransform(robotFrame_, cameraFrame_, ros::Time(0), tfNodeBL);
 				// Compute tf from the baselink of the robot to world frame and put it as the last transform in the vector
 				tf::Transform tfBLOdom = tfCurrNodeFirstNode*tfNodeBL.inverse();
-				transforms_.back() = tfBLOdom;
+				
+				// Discard changes when pitch or yaw is too high (the robot is moving on a plane) after sBA -> rotation axis is too far off the z-axis
+				double yaw, pitch, roll;
+				tfBLOdom.getBasis().getEulerYPR(yaw, pitch, roll);
+				std::cout << "tVec:		[" << tfBLOdom.getOrigin().getX() << ", " << tfBLOdom.getOrigin().getY() << ", " << tfBLOdom.getOrigin().getZ() << "]\n";
+				std::cout << "rVec:		[" << tfBLOdom.getRotation().getAxis().getX() << ", " << tfBLOdom.getRotation().getAxis().getY() << ", " << tfBLOdom.getRotation().getAxis().getZ() << "]\n";
+				std::cout << "Yaw:		" << yaw << "\n";
+				std::cout << "Pitch:		" << pitch << "\n";
+				std::cout << "Roll:		" << roll << "\n";
+				if (std::fabs(pitch) < 0.12 && std::fabs(yaw) < 0.12 && std::fabs(tfBLOdom.getOrigin().getZ()) < 0.15)
+					transforms_.back() = tfBLOdom;
+					return true;
 				}
+				else 
+					{
+					std::cout << "Bad sBA result!\n";
+					return false;
+					}
 			}
 		
 		/*
@@ -906,6 +930,7 @@ class robotMove
 	private:
 //		VisualOdometer odometer_; /**< Visual odometer */
 		std::string moveTopic_; /**< Name of topic to pubish velocity. */
+		std::string goalTopic_; /**< Name of the topic to receive movement goal. */
 		ros::Publisher velPub_; /**< Velocity publisher. */
 	
 	public:
@@ -917,13 +942,16 @@ VisualOdometer odometer_; /**< Visual odometer */
 		 * @param[in] robotFrame Name of the baselink frame.
 		 * @param[in] cameraFrame Name of the camera frame.
 		 * @param[in] Name of the topic to publish velocity.
+		 * @param[in] Name of the topic to receive movement goal.
 		 * */
-		robotMove(StereoSubscriber& stereoSub, std::string worldFrame, std::string robotFrame, std::string cameraFrame, std::string moveTopic) :
+		robotMove(StereoSubscriber& stereoSub, std::string worldFrame, std::string robotFrame, std::string cameraFrame, std::string moveTopic, std::string goalTopic) :
 			odometer_(stereoSub, worldFrame, robotFrame, cameraFrame), 
-			moveTopic_(moveTopic)
+			moveTopic_(moveTopic),
+			goalTopic_(goalTopic)
 			{
 			ros::NodeHandle nh;
 			velPub_ = nh.advertise<geometry_msgs::Twist>("/cmd_vel", 1, true);
+			
 			}
 		
 		/*
@@ -989,9 +1017,10 @@ int main(int argc, char** argv)
 	std::string worldFrame = nh.resolveName("world");
 	std::string robotFrame = nh.resolveName("base_link");
 	std::string cameraFrame = nh.resolveName("camera");
+	std::string goalTopic = nh.resolveName("setgoal");
 	
 	sp_navigation::StereoSubscriber stereoSub(nh, stereoNamespace);
-	sp_navigation::robotMove robot(stereoSub, worldFrame, robotFrame, cameraFrame, "/cmd_vel");
+	sp_navigation::robotMove robot(stereoSub, worldFrame, robotFrame, cameraFrame, "/cmd_vel", goalTopic);
 	
 	ros::Rate loopRate(10);
 	ros::Time begin = ros::Time::now();
