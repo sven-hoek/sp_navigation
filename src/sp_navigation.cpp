@@ -404,6 +404,18 @@ struct Node
 		std::cout << "rVecRel_:	" << rVecRel_ << std::endl;
 		std::cout << "tVecRel_:	" << tVecRel_ << std::endl;
 		
+		// Discard very small or unplausible movements
+//		double angle = cv::norm(rVecRel_);
+/*		for (unsigned int i = 0; i < 3; ++i)
+			{
+			if (std::fabs(rVecRel_.ptr<double>(i)[0]) < 0.006) rVecRel_.ptr<double>(i)[0] = 0;
+			if (std::fabs(tVecRel_.ptr<double>(i)[0]) < 0.008) tVecRel_.ptr<double>(i)[0] = 0;
+			}*/
+//		rVecRel_.ptr<double>(0)[0] = 0;
+//		rVecRel_.ptr<double>(1)[0] = rVecRel_.ptr<double>(1)[0] >= 0 ? angle : -angle;
+//		rVecRel_.ptr<double>(2)[0] = 0;
+		tVecRel_.ptr<double>(1)[0] = 0;
+		
 		// Calculate absolute pose (tf current->world/first)
 		cv::composeRT(-rVecRel_, -tVecRel_, previousNode.rVecAbs_, previousNode.tVecAbs_, rVecAbs_, tVecAbs_);
 		std::cout << "rVecAbs_:	" << rVecAbs_ << std::endl;
@@ -596,6 +608,31 @@ class VisualOdometer
 			ros::NodeHandle nh;
 			posePub_ = nh.advertise<geometry_msgs::PoseStamped>("sp_navigation/Pose", 50);
 			pcPub_ = nh.advertise<PointCloud>("pointcloud", 50);
+			}
+		
+		/*
+		 * Resets all collected data.
+		 * */
+		void reset()
+			{
+			matchFails_ = 0;
+			nodes_.clear();
+			map_.clear();
+			transforms_.clear();
+			}
+		
+		/*
+		 * Deletes all points in the map and all nodes and transforms except for the last one.
+		 * This might be helpful if not too much data should be processed by sBA for faster compution.
+		 * */
+		void deleteOldData()
+			{
+			Node n = nodes_.back();
+			for (unsigned int i = 0; i < n.mapIdxs_.size(); ++i) n.mapIdxs_[i] = -1;
+			tf::Transform tf = transforms_.back();
+			reset();
+			nodes_.push_back(n);
+			transforms_.push_back(tf);
 			}
 		
 		/*
@@ -930,8 +967,11 @@ class robotMove
 	private:
 //		VisualOdometer odometer_; /**< Visual odometer */
 		std::string moveTopic_; /**< Name of topic to pubish velocity. */
-		std::string goalTopic_; /**< Name of the topic to receive movement goal. */
+		std::string destTopic_; /**< Name of the topic to receive movement destination. */
 		ros::Publisher velPub_; /**< Velocity publisher. */
+		ros::Subscriber destSub_; /**< Destination subscriber. */
+		geometry_msgs::Pose dest_; /**< Destination. */
+		bool destSet_; /**< True if a new destination was set and was not reached yet. */
 	
 	public:
 VisualOdometer odometer_; /**< Visual odometer */
@@ -942,16 +982,17 @@ VisualOdometer odometer_; /**< Visual odometer */
 		 * @param[in] robotFrame Name of the baselink frame.
 		 * @param[in] cameraFrame Name of the camera frame.
 		 * @param[in] Name of the topic to publish velocity.
-		 * @param[in] Name of the topic to receive movement goal.
+		 * @param[in] Name of the topic to receive movement dest.
 		 * */
-		robotMove(StereoSubscriber& stereoSub, std::string worldFrame, std::string robotFrame, std::string cameraFrame, std::string moveTopic, std::string goalTopic) :
+		robotMove(StereoSubscriber& stereoSub, std::string worldFrame, std::string robotFrame, std::string cameraFrame, std::string moveTopic, std::string destTopic) :
 			odometer_(stereoSub, worldFrame, robotFrame, cameraFrame), 
 			moveTopic_(moveTopic),
-			goalTopic_(goalTopic)
+			destTopic_(destTopic),
+			destSet_(false)
 			{
 			ros::NodeHandle nh;
-			velPub_ = nh.advertise<geometry_msgs::Twist>("/cmd_vel", 1, true);
-			
+			velPub_ = nh.advertise<geometry_msgs::Twist>(moveTopic, 1, true);
+			destSub_ = nh.subscribe(destTopic, 1, &robotMove::destCallback, this);
 			}
 		
 		/*
@@ -995,6 +1036,166 @@ VisualOdometer odometer_; /**< Visual odometer */
 
 			velPub_.publish(velMSG);
 			}
+		
+		/*
+		 * Callback function of destination subscriber.
+		 * Sets dest_ to received pose.
+		 * @param[in] dest Pointer to received pose.
+		 * */
+		void destCallback(const geometry_msgs::Pose::ConstPtr& dest)
+			{
+			if (!destSet_)
+				{
+				dest_ = *dest;
+				destSet_ = true;
+				std::cout << "Destination set to [" << dest_.position.x << ", " << dest_.position.y << ", " << dest_.position.z << "]\n";
+				}
+			}
+		
+		/*
+		 * Calculates the angle between the translation vector pointing from the robot to the point and the x-axis of the robot base.
+		 * @param[in] x The x coordinate of the point.
+		 * @param[in] y The y coordinate of the point.
+		 * @return The angle between the translation vector pointing to the destination and the x-axis of the robot base.
+		 * */
+		double getAlpha(double x, double y)
+			{
+			// Transform destination into robot frame and scale vector
+			tf::Vector3 localDest = odometer_.transforms_.back().inverse()(tf::Vector3(x, y, 0));
+			return std::atan2(localDest.getY(), localDest.getX());
+			}
+		
+		/*
+		 * Calculates the distance between the robot and a given point
+		 * @param[in] x The x coordinate of the point.
+		 * @param[in] y The y coordinate of the point.
+		 * @return The distance between the robot and the point.
+		 * */
+		double getDistance(double x, double y)
+			{
+			return odometer_.getOrigin().distance(tf::Vector3(x, y, 0.0));
+			}
+		
+		/*
+		 * Turns the robot to have a certain yaw relative to the world frame
+		 * @param[in] destYaw The yaw to be set in the end [-PI, +PI].
+		 * @param[in] speed Scale factor of the speed.
+		 * @param[in] deleteData If true, all old data of the odometer will be deleted beforehand.
+		 * */
+		void setYaw(double destYaw, double speed = 1.0, bool deleteData = true)
+			{
+			if (destYaw < -M_PI || destYaw > M_PI) throw std::runtime_error("Error in robotMove::setYaw: parameter destYaw is out of bounds.");
+			else if (deleteData) odometer_.deleteOldData();
+			double yaw, pitch, roll, angle;
+			odometer_.getBasis().getEulerYPR(yaw, pitch, roll);
+			angle = destYaw - yaw;
+			speed *= 0.5;
+			// Turn
+			ros::Rate loopRate(10);
+			while (std::fabs(angle) > 0.001)
+				{
+				double angVel = angle;
+				if (angVel > speed) angVel = speed;
+				else if (angVel < 0.2) angVel = 0.2;
+				publishVel(0.0, 0.0, angVel);
+				try
+					{
+					update();
+					publishOdomData();
+					}
+				catch(std::exception& e)
+					{
+					std::cout << e.what() << std::endl;
+					}
+				catch(...)
+					{
+					std::cout << "Something unknown went wrong in robotMove::turnByAngle" << std::endl;
+					}
+				odometer_.getBasis().getEulerYPR(yaw, pitch, roll);
+				angle = destYaw - yaw;
+				loopRate.sleep();
+				}
+			// Stop
+			publishVel(0.0, 0.0, 0.0);
+			}
+		
+		/*
+		 * Turns the robot by a given angle.
+		 * @param[in] angle The amount to turn, [-PI, +PI]
+		 * @param[in] speed Scale factor of the speed.
+		 * @param[in] deleteData If true, all old data of the odometer will be deleted beforehand.
+		 * */
+		void turnByAngle(double angle, double speed = 1.0, bool deleteData = true)
+			{
+			if (angle < -M_PI || angle > M_PI) throw std::runtime_error("Error in robotMove::turnByAngle: parameter angle is out of bounds.");
+			double yaw, pitch, roll, destYaw;
+			odometer_.getBasis().getEulerYPR(yaw, pitch, roll);
+			destYaw = yaw + angle;
+			setYaw(destYaw, speed, deleteData);
+			}
+			
+		/*
+		 * Turns the robot so it looks towards a point.
+		 * @param[in] x The x coordinate of the point.
+		 * @param[in] x The y coordinate of the point.
+		 * @param[in] speed Scale factor of the speed.
+		 * @param[in] deleteData If true, all old data of the odometer will be deleted beforehand.
+		 * */
+		void lookTowards(double x, double y, double speed = 1.0, bool deleteData = true)
+			{
+			double alpha = getAlpha(x, y);
+			turnByAngle(alpha, speed, deleteData);
+			}
+		
+		/*
+		 * Moves the robot to a given position without changing the direction of view.
+		 * @param[in] x The x coordinate (in the world frame).
+		 * @param[in] y The y coordinate (in the world frame).
+		 * @param[in] speed Scale factor of the speed.
+		 * @param[in] deleteData If true, all old data of the odometer will be deleted beforehand.
+		 * */
+		void goTo(double x, double y, double speed = 1.0, bool deleteData = true)
+			{
+			if (deleteData) odometer_.deleteOldData();
+			speed *= 0.1;
+			
+			// Transform destination into robot frame and scale vector
+			tf::Vector3 localDest = odometer_.transforms_.back().inverse()(tf::Vector3(x, y, 0));
+			localDest.normalize();
+			
+			// Move
+			ros::Rate loopRate(10);
+			double dist = getDistance(x, y);
+			tf::Vector3 speedVec;
+			while (dist > 0.1)
+				{
+				// Set speed according to distance
+				double newSpeed = speed * dist * 3.;
+				if (newSpeed > speed) newSpeed = speed;
+				else if (newSpeed < 0.04) newSpeed = 0.04;
+				speedVec = localDest * newSpeed;
+				publishVel(speedVec.getX(), speedVec.getY(), 0.0);
+				// Update odometer
+				try
+					{
+					update();
+					publishOdomData();
+					}
+				catch(std::exception& e)
+					{
+					std::cout << e.what() << std::endl;
+					}
+				catch(...)
+					{
+					std::cout << "Something unknown went wrong in robotMove::goTo." << std::endl;
+					}
+				// Update distance
+				dist = getDistance(x, y);
+				loopRate.sleep();
+				}
+			// Stop moving
+			publishVel(0.0, 0.0, 0.0);
+			}
 	};
 } //End of namespace
 
@@ -1017,10 +1218,10 @@ int main(int argc, char** argv)
 	std::string worldFrame = nh.resolveName("world");
 	std::string robotFrame = nh.resolveName("base_link");
 	std::string cameraFrame = nh.resolveName("camera");
-	std::string goalTopic = nh.resolveName("setgoal");
+	std::string destTopic = nh.resolveName("setdest");
 	
 	sp_navigation::StereoSubscriber stereoSub(nh, stereoNamespace);
-	sp_navigation::robotMove robot(stereoSub, worldFrame, robotFrame, cameraFrame, "/cmd_vel", goalTopic);
+	sp_navigation::robotMove robot(stereoSub, worldFrame, robotFrame, cameraFrame, "/cmd_vel", destTopic);
 	
 	ros::Rate loopRate(10);
 	ros::Time begin = ros::Time::now();
@@ -1044,6 +1245,10 @@ int main(int argc, char** argv)
 			{
 			std::cout << "Something unknown went wrong." << std::endl;
 			}
+if (!robot.odometer_.transforms_.empty())
+	{
+	std::cout << "---------------------------------  [" << robot.getAlpha(2, -1) << "]\n";
+	}
 		std::cout << "Time used:		" << time*1000 << "ms" << std::endl << std::endl;
 		loopRate.sleep();
 		}
