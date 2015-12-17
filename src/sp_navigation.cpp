@@ -336,8 +336,8 @@ struct Node
 				}
 			}
 		meanDist = meanDist/matches1.size();
-		std::cout << "meanDist prev-curr:		" << meanDist << std::endl;
-		std::cout << "Matches1 prev-curr:		" << matches1.size() << std::endl;
+//		std::cout << "meanDist prev-curr:		" << meanDist << std::endl;
+//		std::cout << "Matches1 prev-curr:		" << matches1.size() << std::endl;
 		
 		// Only use matches that are below 2*meanDist to eliminate wrong matches
 		std::vector<cv::Point2f> matchedPointsCurr, matchedPointsPrev;
@@ -353,7 +353,7 @@ struct Node
 				matches.push_back(matches1[i]);
 				}
 			}
-		std::cout << "Matches prev-curr:		" << matches.size() << std::endl;
+//		std::cout << "Matches prev-curr:		" << matches.size() << std::endl;
 		
 		// Remove outliers by double RANSAC to yield better results
 		std::vector<unsigned char> inlierStatus1;
@@ -372,7 +372,7 @@ struct Node
 				matchesToPrev.push_back(matches[i]);
 				}
 			}
-		std::cout << "Matches prev-curr after RANSAC1:	" << matchesToPrev.size() << std::endl;
+//		std::cout << "Matches prev-curr after RANSAC1:	" << matchesToPrev.size() << std::endl;
 		
 		
 		std::vector<unsigned char> inlierStatus;
@@ -389,7 +389,7 @@ struct Node
 				matchesToPrev_.push_back(matchesToPrev[i]);
 				}
 			}
-		std::cout << "Matches prev-curr after RANSAC2:	" << matchesToPrev_.size() << std::endl;
+//		std::cout << "Matches prev-curr after RANSAC2:	" << matchesToPrev_.size() << std::endl;
 		
 		// Try to get pose between previous and current node (tf previous->current)
 		if (!useBadPose && filteredMatchedPointsCurr.size() < 8) return false;
@@ -401,8 +401,8 @@ struct Node
 			}
 		else cv::solvePnPRansac(filteredMatchedNodePointsPrev, filteredMatchedPointsCurr, projMat_l_.colRange(0,3), cv::noArray(), rVecRel_, tVecRel_, false, 500, 2.0);
 
-		std::cout << "rVecRel_:	" << rVecRel_ << std::endl;
-		std::cout << "tVecRel_:	" << tVecRel_ << std::endl;
+//		std::cout << "rVecRel_:	" << rVecRel_ << std::endl;
+//		std::cout << "tVecRel_:	" << tVecRel_ << std::endl;
 		
 		// Discard very small or unplausible movements
 //		double angle = cv::norm(rVecRel_);
@@ -418,8 +418,8 @@ struct Node
 		
 		// Calculate absolute pose (tf current->world/first)
 		cv::composeRT(-rVecRel_, -tVecRel_, previousNode.rVecAbs_, previousNode.tVecAbs_, rVecAbs_, tVecAbs_);
-		std::cout << "rVecAbs_:	" << rVecAbs_ << std::endl;
-		std::cout << "tVecAbs_:	" << tVecAbs_ << std::endl;
+//		std::cout << "rVecAbs_:	" << rVecAbs_ << std::endl;
+//		std::cout << "tVecAbs_:	" << tVecAbs_ << std::endl;
 		
 		// Check if map pointer is valid and create reference for easier access
 		if (map_ == NULL) throw std::runtime_error("Error in Node::putIntoWorld: Pointer to map_ is a NULL pointer!");
@@ -451,7 +451,7 @@ struct Node
 					}
 				}
 			}
-		std::cout << std::endl << "New map size:		" << map_->size() << std::endl;
+//		std::cout << std::endl << "New map size:		" << map_->size() << std::endl;
 		return true;
 		}
 	
@@ -712,7 +712,7 @@ class VisualOdometer
 					tfBLOdom.getBasis().getEulerYPR(yaw, pitch, roll);
 					std::cout << "Robot position:" << std::endl;
 					std::cout << "tVec:		[" << tfBLOdom.getOrigin().getX() << ", " << tfBLOdom.getOrigin().getY() << ", " << tfBLOdom.getOrigin().getZ() << "]\n";
-					std::cout << "rVec:		" << tfBLOdom.getRotation().getAxis().getX() << ", " << tfBLOdom.getRotation().getAxis().getY() << ", " << tfBLOdom.getRotation().getAxis().getZ() << "]\n";
+//					std::cout << "rVec:		" << tfBLOdom.getRotation().getAxis().getX() << ", " << tfBLOdom.getRotation().getAxis().getY() << ", " << tfBLOdom.getRotation().getAxis().getZ() << "]\n";
 					std::cout << "Yaw:		" << yaw << "\n";
 					std::cout << "Pitch:		" << pitch << "\n";
 					std::cout << "Roll:		" << roll << "\n";
@@ -991,7 +991,7 @@ VisualOdometer odometer_; /**< Visual odometer */
 			destSet_(false)
 			{
 			ros::NodeHandle nh;
-			velPub_ = nh.advertise<geometry_msgs::Twist>(moveTopic, 1, true);
+			velPub_ = nh.advertise<geometry_msgs::Twist>(moveTopic, 10, true);
 			destSub_ = nh.subscribe(destTopic, 1, &robotMove::destCallback, this);
 			}
 		
@@ -1002,6 +1002,7 @@ VisualOdometer odometer_; /**< Visual odometer */
 		 * */
 		double update(bool useBadPose = false)
 			{
+			ros::spinOnce();
 			double tickTime = (double)cv::getTickCount();
 			odometer_.update(useBadPose);
 			tickTime = ((double)cv::getTickCount() - tickTime) / cv::getTickFrequency();
@@ -1035,21 +1036,6 @@ VisualOdometer odometer_; /**< Visual odometer */
 			velMSG.angular.z = velOmega;
 
 			velPub_.publish(velMSG);
-			}
-		
-		/*
-		 * Callback function of destination subscriber.
-		 * Sets dest_ to received pose.
-		 * @param[in] dest Pointer to received pose.
-		 * */
-		void destCallback(const geometry_msgs::Pose::ConstPtr& dest)
-			{
-			if (!destSet_)
-				{
-				dest_ = *dest;
-				destSet_ = true;
-				std::cout << "Destination set to [" << dest_.position.x << ", " << dest_.position.y << ", " << dest_.position.z << "]\n";
-				}
 			}
 		
 		/*
@@ -1089,14 +1075,45 @@ VisualOdometer odometer_; /**< Visual odometer */
 			double yaw, pitch, roll, angle;
 			odometer_.getBasis().getEulerYPR(yaw, pitch, roll);
 			angle = destYaw - yaw;
+			if (angle > M_PI) angle = -2.0*M_PI + angle;
+			else if (angle < -M_PI) angle = 2.0*M_PI + angle;
+			turnByAngle(angle, speed, deleteData);
+			}
+		
+		/*
+		 * Turns the robot by a given angle.
+		 * @param[in] angle The amount to turn, [-PI, +PI]
+		 * @param[in] speed Scale factor of the speed.
+		 * @param[in] deleteData If true, all old data of the odometer will be deleted beforehand.
+		 * */
+		void turnByAngle(double angle, double speed = 1.0, bool deleteData = true)
+			{
+			if (angle < -M_PI || angle > M_PI) throw std::runtime_error("Error in robotMove::turnByAngle: parameter angle is out of bounds.");
+			
+			double yaw, pitch, roll, destYaw;
+			odometer_.getBasis().getEulerYPR(yaw, pitch, roll);
+			destYaw = yaw + angle;
+			// Check if destYaw is out of [-PI, PI]
+			int overflow = 0;
+			if (destYaw > M_PI) overflow = 1;
+			else if (destYaw < -M_PI) overflow = -1;
+			
 			speed *= 0.5;
 			// Turn
 			ros::Rate loopRate(10);
-			while (std::fabs(angle) > 0.001)
+			while (ros::ok() && std::fabs(angle) > 0.08)
 				{
 				double angVel = angle;
-				if (angVel > speed) angVel = speed;
-				else if (angVel < 0.2) angVel = 0.2;
+				if (angVel >= 0)
+					{
+					if (angVel > speed) angVel = speed;
+					else if (angVel < 0.2) angVel = 0.2;
+					}
+				else
+					{
+					if (angVel < -speed) angVel = -speed;
+					else if (angVel > -0.2) angVel = -0.2;
+					}
 				publishVel(0.0, 0.0, angVel);
 				try
 					{
@@ -1112,26 +1129,17 @@ VisualOdometer odometer_; /**< Visual odometer */
 					std::cout << "Something unknown went wrong in robotMove::turnByAngle" << std::endl;
 					}
 				odometer_.getBasis().getEulerYPR(yaw, pitch, roll);
+std::cout << "Yaw:		" << yaw << "\n";
+				if (overflow == 1 && yaw < 0.0) yaw = 2.0*M_PI + yaw;
+				else if (overflow == -1 && yaw > 0.0) yaw = -2.0*M_PI + yaw;
+std::cout << "New yaw:	" << angle << "\n";
+std::cout << "Dest yaw:	" << angle << "\n";
 				angle = destYaw - yaw;
+std::cout << "Angle to destination:	" << angle << "\n";
 				loopRate.sleep();
 				}
 			// Stop
 			publishVel(0.0, 0.0, 0.0);
-			}
-		
-		/*
-		 * Turns the robot by a given angle.
-		 * @param[in] angle The amount to turn, [-PI, +PI]
-		 * @param[in] speed Scale factor of the speed.
-		 * @param[in] deleteData If true, all old data of the odometer will be deleted beforehand.
-		 * */
-		void turnByAngle(double angle, double speed = 1.0, bool deleteData = true)
-			{
-			if (angle < -M_PI || angle > M_PI) throw std::runtime_error("Error in robotMove::turnByAngle: parameter angle is out of bounds.");
-			double yaw, pitch, roll, destYaw;
-			odometer_.getBasis().getEulerYPR(yaw, pitch, roll);
-			destYaw = yaw + angle;
-			setYaw(destYaw, speed, deleteData);
 			}
 			
 		/*
@@ -1146,6 +1154,41 @@ VisualOdometer odometer_; /**< Visual odometer */
 			double alpha = getAlpha(x, y);
 			turnByAngle(alpha, speed, deleteData);
 			}
+			
+		/*
+		 * Searches for the area with the most features visible between a given angle to the left and to the right.
+		 * @param[in] angle The maximum angle it will turn to the left and the right (in rad).
+		 * @param[in] speed Scale factor of the speed.
+		 * @param[in] deleteData If true, all old data of the odometer will be deleted beforehand.
+		 * @return The yaw value where the most features have been found.
+		 * */
+		double searchMaxFeatures(double angle, double speed = 1.0, bool deleteData = true)
+			{
+			double yaw, pitch, roll, yawBegin;
+			odometer_.getBasis().getEulerYPR(yaw, pitch, roll);
+			yawBegin = yaw;
+			turnByAngle(angle, speed, deleteData);
+			// Memorize at which node it started
+			int nodeIdxBegin = odometer_.nodes_.size() - 1;
+			turnByAngle(-2 * angle, speed, false);
+			int nodeIdxEnd = odometer_.nodes_.size() - 1;
+			// Turn back so the robot has the same orientation as in the beginning
+			setYaw(yawBegin, speed, false);
+			
+			// Now search for the node with the most features and store its yaw
+			unsigned int maxFeatures = 0, maxIndex;
+			for (unsigned int i = nodeIdxBegin; i <= nodeIdxEnd; ++i)
+				{
+				if (odometer_.nodes_[i].stereoPoints_l_.size() > maxFeatures)
+					{
+					maxFeatures = odometer_.nodes_[i].stereoPoints_l_.size();
+					maxIndex = i;
+					}
+				}
+			// Get yaw
+			odometer_.transforms_[maxIndex].getBasis().getEulerYPR(yaw, pitch, roll);
+			return yaw;
+			}
 		
 		/*
 		 * Moves the robot to a given position without changing the direction of view.
@@ -1157,7 +1200,7 @@ VisualOdometer odometer_; /**< Visual odometer */
 		void goTo(double x, double y, double speed = 1.0, bool deleteData = true)
 			{
 			if (deleteData) odometer_.deleteOldData();
-			speed *= 0.1;
+			speed *= 0.2;
 			
 			// Transform destination into robot frame and scale vector
 			tf::Vector3 localDest = odometer_.transforms_.back().inverse()(tf::Vector3(x, y, 0));
@@ -1167,12 +1210,12 @@ VisualOdometer odometer_; /**< Visual odometer */
 			ros::Rate loopRate(10);
 			double dist = getDistance(x, y);
 			tf::Vector3 speedVec;
-			while (dist > 0.1)
+			while (ros::ok() && dist > 0.05)
 				{
 				// Set speed according to distance
 				double newSpeed = speed * dist * 3.;
 				if (newSpeed > speed) newSpeed = speed;
-				else if (newSpeed < 0.04) newSpeed = 0.04;
+				else if (newSpeed < 0.06) newSpeed = 0.06;
 				speedVec = localDest * newSpeed;
 				publishVel(speedVec.getX(), speedVec.getY(), 0.0);
 				// Update odometer
@@ -1191,10 +1234,33 @@ VisualOdometer odometer_; /**< Visual odometer */
 					}
 				// Update distance
 				dist = getDistance(x, y);
+				localDest = odometer_.transforms_.back().inverse()(tf::Vector3(x, y, 0));
+				localDest.normalize();
 				loopRate.sleep();
 				}
 			// Stop moving
 			publishVel(0.0, 0.0, 0.0);
+			}
+		
+		/*
+		 * Callback function of destination subscriber.
+		 * Sets dest_ to received pose.
+		 * @param[in] dest Pointer to received pose.
+		 * */
+		void destCallback(const geometry_msgs::Pose::ConstPtr& dest)
+			{
+			/*if (!destSet_)
+				{
+				dest_ = *dest;
+				destSet_ = true;
+				std::cout << "Destination set to [" << dest_.position.x << ", " << dest_.position.y << ", " << dest_.position.z << "]\n";
+				}*/
+			//lookTowards(dest->orientation.y, dest->orientation.z);
+			//goTo(dest->position.x, dest->position.y);
+			//setYaw(dest->orientation.z);
+			double bestYaw = searchMaxFeatures(0.7, 0.7);
+			setYaw(bestYaw);
+			//turnByAngle(dest->orientation.z)
 			}
 	};
 } //End of namespace
@@ -1222,19 +1288,20 @@ int main(int argc, char** argv)
 	
 	sp_navigation::StereoSubscriber stereoSub(nh, stereoNamespace);
 	sp_navigation::robotMove robot(stereoSub, worldFrame, robotFrame, cameraFrame, "/cmd_vel", destTopic);
+
 	
 	ros::Rate loopRate(10);
 	ros::Time begin = ros::Time::now();
 	ros::Duration collDur(9.0);
 	double time;
 //	while (ros::ok() && ros::Time::now()-begin < collDur) // run a certain time
-//	while (ros::ok() && robot.odometer_.nodes_.size() < 70) // Run until a certain amount of nodes have been created
-	while (ros::ok())
+	while (ros::ok() && robot.odometer_.nodes_.size() < 2) // Run until a certain amount of nodes have been created
+//	while (ros::ok())
 		{
 		ros::spinOnce();
 		try
 			{
-			time = robot.update();
+			time = robot.update(true);
 			robot.publishOdomData();
 			}
 		catch(std::exception& e)
@@ -1245,19 +1312,17 @@ int main(int argc, char** argv)
 			{
 			std::cout << "Something unknown went wrong." << std::endl;
 			}
-if (!robot.odometer_.transforms_.empty())
-	{
-	std::cout << "---------------------------------  [" << robot.getAlpha(2, -1) << "]\n";
-	}
 		std::cout << "Time used:		" << time*1000 << "ms" << std::endl << std::endl;
 		loopRate.sleep();
 		}
-	
+/*	
 	if (ros::ok()) robot.odometer_.runSBA(75, false);
 	// continue publishing data after BA has been run
 	while (ros::ok())
 		{
 		robot.publishOdomData();
 		loopRate.sleep();
-		}
+		}*/
+	ros::spin();
+	return 0;
 	}
