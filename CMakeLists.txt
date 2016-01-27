@@ -36,6 +36,6 @@ link_directories(${PCL_LIBRARY_DIRS})
 
 add_definitions(${PCL_DEFINITIONS})
 
-add_executable(sp_navigation src/sp_navigation.cpp)
+add_executable(sp_navigation src/sp_navigation.cpp src/node.cpp src/stereo_subscriber.cpp src/visual_odometer.cpp)
 target_link_libraries(sp_navigation ${catkin_LIBRARIES} ${OpenCV_LIBRARIES} ${cvsba_LIBS} ${PCL_LIBRARIES})
 add_dependencies(sp_navigation sp_navigation_generate_messages_cpp)

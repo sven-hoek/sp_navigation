@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package>
   <name>sp_navigation</name>
-  <version>0.0.0</version>
+  <version>0.1.0</version>
   <description>This package uses visual odometry to navigate a robot to a certain position.</description>
   <maintainer email="herrlauch@googlemail.com">Marcus Ebner von Eschenbach</maintainer>
   <license>MIT</license>
@@ -34,5 +34,4 @@
   <run_depend>libpcl-all</run_depend>
   <run_depend>cv_bridge</run_depend>
   <run_depend>image_geometry</run_depend>
-
 </package>

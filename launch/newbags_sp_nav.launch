@@ -1,12 +1,11 @@
 <launch>
   <!-- Setup the camera -->
   <arg name="camera" default="/vrmagic"/>
-  <param name="/use_sim_time" value="false"/>
+  <arg name="bagfile" default="$(find sp_navigation)/data/2015-11-27-14-54-24.bag"/>
+  <param name="/use_sim_time" value="true"/>
 
-  <include file="$(find vrmagic_camera)/launch/camera.launch"/>
-  
   <!-- Setup robot: tf and robot model -->
-  <node pkg="tf" type="static_transform_publisher" name="handeye_broadcaster" args="0.0971762 0.15991 0.2773538 0.49462 -0.50437 0.49653 -0.50426 base_link VRMAGIC 100" />
+  <node pkg="tf" type="static_transform_publisher" name="baselink_broadcaster" args="0.0971762 0.15991 0.2773538 0.49462 -0.50437 0.49653 -0.50426 base_link VRMAGIC 100" />
   <param name="robot_description" command="cat $(find robotino_description)/urdf/robotino.urdf" />
   
   <!-- Run the stereo image proc -->
@@ -34,5 +33,8 @@
     <param name="target_frame_name" value="world"/>
     <param name="trajectory_publish_rate" value="2.0"/>
   </node>
+  
+  <!-- Play the bagfile -->
+  <node pkg="rosbag" type="play" name="player" args="--clock -d 1 -r 0.3 $(arg bagfile)"/>
   
 </launch>
